@@ -97,6 +97,95 @@ RC_SUPPLEMENTS = {
     },
 }
 
+# =========================================================
+# BARÈMES INSTALLATIONS ET ÉQUIPEMENTS DE CHANTIER (A21, A22)
+# =========================================================
+
+# Taux annuels pour grues à tour (en ‰)
+TARIFS_GRUES_TOUR = {
+    "< 30M": {
+        "Classe 1": 8.5,
+        "Classe 2": 11.05,
+        "Classe 3": 13.06,
+    },
+    "> 30M": {
+        "Classe 1": 10.2,
+        "Classe 2": 12.75,
+        "Classe 3": 15.3,
+    }
+}
+
+# Taux annuels pour engins mobiles (en ‰)
+TARIFS_ENGINS = {
+    "Grue automobile": {
+        "Classe 1": 12.75,
+        "Classe 2": 17.0,
+        "Classe 3": 21.25,
+    },
+    "Bulldozers, niveleuses, scrapers": {
+        "Classe 1": 8.5,
+        "Classe 2": 12.75,
+        "Classe 3": 17.0,
+    },
+    "Chargeurs, dumpers": {
+        "Classe 1": 8.5,
+        "Classe 2": 12.75,
+        "Classe 3": 17.0,
+    },
+    "Compacteurs vibrants": {
+        "Classe 1": 8.5,
+        "Classe 2": 10.2,
+        "Classe 3": 12.75,
+    },
+    "Sonnettes / extracteurs de pieux": {
+        "Classe 1": 10.2,
+        "Classe 2": 12.75,
+        "Classe 3": 15.3,
+    },
+    "Rouleaux compresseurs": {
+        "Classe 1": 8.5,
+        "Classe 2": 10.2,
+        "Classe 3": 12.75,
+    },
+    "Locomotives de chantier": {
+        "Classe 1": 5.1,
+        "Classe 2": 6.8,
+        "Classe 3": 8.5,
+    },
+}
+
+# Taux pour baraquements provisoires (en ‰)
+TARIFS_BARAQUEMENTS = {
+    "Baraquement de stockage": 4.5,
+    "Bureaux provisoires de chantier": 4.0,
+}
+
+# Coefficients de durée (% du taux annuel)
+COEF_DUREE_EQUIPEMENTS = {
+    1: 0.45,
+    2: 0.50,
+    3: 0.55,
+    4: 0.60,
+    5: 0.65,
+    6: 0.70,
+    7: 0.75,
+    8: 0.80,
+    9: 0.85,
+    10: 0.90,
+    11: 0.95,
+    12: 1.00,
+}
+
+# Rabais franchise pour équipements (franchise supérieure à 10% mini 500K)
+RABAIS_FRANCHISE_EQUIPEMENTS = {
+    "10% mini 500 000 FCFA (standard)": 1.0,
+    "10% mini 1 000 000 FCFA (Rabais 5%)": 0.95,
+    "10% mini 2 000 000 FCFA (Rabais 10%)": 0.90,
+    "10% mini 5 000 000 FCFA (Rabais 15%)": 0.85,
+    "10% mini 10 000 000 FCFA (Rabais 25%)": 0.75,
+    "Franchise divisée par 2 (Majoration 25%)": 1.25,
+}
+
 # NOUVEAU: Dictionnaire des clauses
 CLAUSES = {
     "obligatoires": {
@@ -188,15 +277,121 @@ def calc_taxes(prime_nette, accessoires, taux=0.145):
     return (prime_nette + accessoires) * taux
 
 # =========================================================
+# FONCTIONS DE CALCUL - ÉQUIPEMENTS ET INSTALLATIONS
+# =========================================================
+def get_coef_duree_equipement(duree_mois):
+    """Retourne le coefficient de durée pour les équipements."""
+    if duree_mois <= 12:
+        return COEF_DUREE_EQUIPEMENTS.get(duree_mois, 1.0)
+    else:
+        # Si > 12 mois, proratiser (durée/12)
+        return duree_mois / 12.0
+
+def calc_prime_equipement(valeur, taux_annuel, duree_mois, coef_franchise):
+    """
+    Calcule la prime pour un équipement.
+    Prime = Valeur × Taux annuel × Coef durée × Coef franchise
+    """
+    coef_duree = get_coef_duree_equipement(duree_mois)
+    prime = valeur * (taux_annuel / 1000) * coef_duree * coef_franchise
+    return prime
+
+def get_taux_grue_tour(valeur, classe_chantier):
+    """Retourne le taux annuel (‰) pour une grue à tour."""
+    if valeur < 30_000_000:
+        return TARIFS_GRUES_TOUR["< 30M"][classe_chantier]
+    else:
+        return TARIFS_GRUES_TOUR["> 30M"][classe_chantier]
+
+def get_taux_engin(type_engin, classe_chantier):
+    """Retourne le taux annuel (‰) pour un engin mobile."""
+    return TARIFS_ENGINS.get(type_engin, {}).get(classe_chantier, 0)
+
+def get_taux_baraquement(type_baraquement):
+    """Retourne le taux annuel (‰) pour un baraquement."""
+    return TARIFS_BARAQUEMENTS.get(type_baraquement, 0)
+
+# =========================================================
 # INTERFACE UTILISATEUR (UI)
 # =========================================================
 st.title("ASSUR DEFENDER – Tous Risques Chantier (TRC)")
 st.markdown("---")
 
 # ---------------------------------------------------------
-# 1. Informations générales
+# 1. Informations du projet et des intervenants
 # ---------------------------------------------------------
-st.markdown('<div class="section-title">Informations générales</div>', unsafe_allow_html=True)
+st.markdown('<div class="section-title">Informations du projet et des intervenants</div>', unsafe_allow_html=True)
+
+# Sous-section: Informations contractuelles
+st.markdown('<div class="section-subtitle">Informations contractuelles</div>', unsafe_allow_html=True)
+col_info1, col_info2 = st.columns(2)
+souscripteur = col_info1.text_input("Souscripteur", key="souscripteur")
+proposant = col_info2.text_input("Proposant", key="proposant")
+intermediaire = col_info1.text_input("Intermédiaire", key="intermediaire")
+
+st.markdown('<div class="divider"></div>', unsafe_allow_html=True)
+
+# Sous-section: Intervenants du projet
+st.markdown('<div class="section-subtitle">Intervenants du projet</div>', unsafe_allow_html=True)
+col_int1, col_int2 = st.columns(2)
+entreprise_principale = col_int1.text_input("Entreprise Principale", key="entreprise_principale")
+maitre_ouvrage = col_int2.text_input("Maître d'ouvrage", key="maitre_ouvrage")
+maitrise_oeuvre = col_int1.text_input("Maîtrise d'œuvre", key="maitrise_oeuvre")
+bureau_controle = col_int2.text_input("Bureau de Contrôle Technique", key="bureau_controle")
+bureau_etude = col_int1.text_input("Bureau d'étude", key="bureau_etude")
+labo_geotechnique = col_int2.text_input("Laboratoire d'Étude géotechnique", key="labo_geotechnique")
+autres_intervenants = st.text_area("Autres Intervenants", key="autres_intervenants", height=80)
+
+st.markdown('<div class="divider"></div>', unsafe_allow_html=True)
+
+# Sous-section: Description du projet
+st.markdown('<div class="section-subtitle">Description du projet</div>', unsafe_allow_html=True)
+col_desc1, col_desc2 = st.columns(2)
+nature_travaux = col_desc1.text_area("Nature des travaux", key="nature_travaux", height=100)
+situation_geo = col_desc2.text_area("Situation géographique", key="situation_geo", height=100)
+
+st.markdown('<div class="divider"></div>', unsafe_allow_html=True)
+
+# Sous-section: Calendrier et périodes
+st.markdown('<div class="section-subtitle">Calendrier du projet</div>', unsafe_allow_html=True)
+col_cal1, col_cal2, col_cal3 = st.columns(3)
+debut_travaux = col_cal1.date_input("Début des travaux", key="debut_travaux")
+fin_travaux = col_cal2.date_input("Fin des travaux", key="fin_travaux")
+# Calcul automatique de la durée en mois si les deux dates sont renseignées
+if debut_travaux and fin_travaux:
+    duree_calculee = (fin_travaux.year - debut_travaux.year) * 12 + (fin_travaux.month - debut_travaux.month)
+    if duree_calculee < 0:
+        duree_calculee = 0
+    col_cal3.metric("Durée calculée", f"{duree_calculee} mois")
+else:
+    duree_calculee = None
+
+st.markdown('<div class="divider"></div>', unsafe_allow_html=True)
+
+# Sous-section: Maintenance et Essais
+st.markdown('<div class="section-subtitle">Maintenance et Essais</div>', unsafe_allow_html=True)
+col_maint1, col_maint2 = st.columns(2)
+maintenance_incluse = col_maint1.checkbox("Maintenance incluse", key="maintenance_incluse")
+if maintenance_incluse:
+    periode_maintenance = col_maint2.text_input("Période de maintenance", key="periode_maintenance", 
+                                                  placeholder="Ex: 12 mois à compter de la réception")
+else:
+    periode_maintenance = ""
+
+col_essai1, col_essai2 = st.columns(2)
+essai_inclus = col_essai1.checkbox("Essai inclus", key="essai_inclus")
+if essai_inclus:
+    periode_essai = col_essai2.text_input("Période d'essai", key="periode_essai",
+                                           placeholder="Ex: 3 mois")
+else:
+    periode_essai = ""
+
+st.markdown('<div class="divider"></div>', unsafe_allow_html=True)
+
+# ---------------------------------------------------------
+# 2. Informations générales (tarifaires)
+# ---------------------------------------------------------
+st.markdown('<div class="section-title">Informations tarifaires</div>', unsafe_allow_html=True)
 
 # Option de tarification manuelle volontaire au début
 tarif_manuel_volontaire = st.checkbox("Appliquer une tarification manuelle (hors barème)", key="tarif_volontaire_debut")
@@ -205,7 +400,10 @@ g1, g2 = st.columns([1, 2])
 type_travaux = g1.selectbox("Type de travaux", ["Bâtiment", "Assainissement", "Route"], key="type_travaux")
 # Montant par défaut à 0
 montant = g1.number_input("Montant du chantier (Valeur à assurer)", min_value=0, value=0, step=10_000_000, format="%d")
-duree = g2.number_input("Durée prévisionnelle (en mois)", min_value=1, value=12, step=1)
+# Utiliser la durée calculée si disponible, sinon 12 par défaut
+duree_defaut = duree_calculee if duree_calculee is not None and duree_calculee > 0 else 12
+duree = g2.number_input("Durée prévisionnelle (en mois)", min_value=1, value=duree_defaut, step=1, 
+                        help="Cette durée sera utilisée pour le calcul tarifaire")
 franchise_key = g2.selectbox("Franchise de base retenue", list(FRANCHISE_COEF.keys()))
 
 # Vérification du dépassement de 2 milliards
@@ -225,9 +423,9 @@ elif depasse_limite:
 st.markdown('<div class="divider"></div>', unsafe_allow_html=True)
 
 # ---------------------------------------------------------
-# 2. Paramètres spécifiques
+# 3. Paramètres spécifiques
 # ---------------------------------------------------------
-st.markdown('<div class="section-title">Paramètres tarifaires</div>', unsafe_allow_html=True)
+st.markdown('<div class="section-title">Paramètres tarifaires spécifiques</div>', unsafe_allow_html=True)
 
 usage_key = None
 structure = None
@@ -258,7 +456,7 @@ else:
 st.markdown('<div class="divider"></div>', unsafe_allow_html=True)
 
 # ---------------------------------------------------------
-# 3. Données techniques & Éligibilité
+# 4. Données techniques & Éligibilité
 # ---------------------------------------------------------
 st.markdown('<div class="section-title">Éligibilité du chantier</div>', unsafe_allow_html=True)
 st.write("Veuillez confirmer que le chantier respecte les conditions du barème.")
@@ -327,7 +525,7 @@ else:
 st.markdown('<div class="divider"></div>', unsafe_allow_html=True)
 
 # ---------------------------------------------------------
-# 4. Documents requis
+# 5. Documents requis
 # ---------------------------------------------------------
 st.markdown('<div class="section-title">Documents requis</div>', unsafe_allow_html=True)
 
@@ -360,7 +558,7 @@ else:
 st.markdown('<div class="divider"></div>', unsafe_allow_html=True)
 
 # ---------------------------------------------------------
-# 5. Extensions de garantie
+# 6. Extensions de garantie
 # ---------------------------------------------------------
 st.markdown('<div class="section-title">Extensions de garantie</div>', unsafe_allow_html=True)
 
@@ -414,7 +612,131 @@ if extensions_dt:
 st.markdown('<div class="divider"></div>', unsafe_allow_html=True)
 
 # ---------------------------------------------------------
-# 6. Saisie manuelle (si montant > 2 milliards OU validation DT OU volontaire)
+# 5bis. ÉQUIPEMENTS ET INSTALLATIONS DE CHANTIER (A21, A22)
+# ---------------------------------------------------------
+# Cette section n'apparaît que si les clauses A21 ou A22 sont cochées
+if ext_materiel or ext_baraquement:
+    st.markdown('<div class="section-title">Équipements et Installations de Chantier</div>', unsafe_allow_html=True)
+    st.info("ℹ️ Cette section permet de tarifer les équipements et installations de chantier (A21, A22). Chaque équipement est tarifé individuellement selon sa classe de risque, sa durée et sa franchise.")
+    
+    # Classification du chantier
+    st.markdown('<div class="section-subtitle">Classification du chantier</div>', unsafe_allow_html=True)
+    st.markdown("**Classe de risque du chantier**")
+    st.markdown("""
+    - **Classe 1** : Chantiers situés en zones isolées non inondables, terrains plats ou à faibles déclivités ; pas d'excavation profonde, pas de tranchée importante.
+    - **Classe 2** : Chantiers situés en zones soumises à possibilités d'inondations ; excavations profondes, tranchées ; terrains difficiles (déclivités, risques de glissements).
+    - **Classe 3** : Chantiers en zones très exposées ; possibilité d'inondations, tempête ou tremblement de terre ; travaux en montagne, fortes déclivités, risques de chutes de roches, glissement de terrains, etc.
+    """)
+    
+    classe_chantier = st.selectbox(
+        "Sélectionnez la classe",
+        ["Classe 1", "Classe 2", "Classe 3"],
+        label_visibility="collapsed"
+    )
+    
+    # Initialisation de la liste des équipements dans session_state
+    if 'equipements' not in st.session_state:
+        st.session_state.equipements = []
+    
+    st.markdown('<div class="section-subtitle">Liste des équipements à assurer</div>', unsafe_allow_html=True)
+    
+    # Formulaire d'ajout d'équipement
+    with st.expander("➕ Ajouter un équipement", expanded=len(st.session_state.equipements) == 0):
+        type_eq = st.selectbox(
+            "Type d'équipement",
+            ["--- Grues ---", "Grue à tour", "Grue automobile", 
+             "--- Engins mobiles ---", "Bulldozers, niveleuses, scrapers", "Chargeurs, dumpers", 
+             "Compacteurs vibrants", "Sonnettes / extracteurs de pieux", "Rouleaux compresseurs", 
+             "Locomotives de chantier",
+             "--- Baraquements ---", "Baraquement de stockage", "Bureaux provisoires de chantier"],
+            key="type_eq_add"
+        )
+        
+        # Ne pas permettre de sélectionner les séparateurs
+        if type_eq.startswith("---"):
+            st.warning("Veuillez sélectionner un type d'équipement valide")
+            type_eq_valide = False
+        else:
+            type_eq_valide = True
+            
+        col_eq1, col_eq2 = st.columns(2)
+        designation = col_eq1.text_input("Désignation / Description", key="design_add")
+        valeur_eq = col_eq2.number_input("Valeur à neuf (FCFA)", min_value=0, value=0, step=100_000, format="%d", key="valeur_add")
+        
+        col_eq3, col_eq4 = st.columns(2)
+        duree_eq = col_eq3.number_input("Durée de présence (mois)", min_value=1, max_value=36, value=12, key="duree_add")
+        franchise_eq = col_eq4.selectbox(
+            "Franchise",
+            list(RABAIS_FRANCHISE_EQUIPEMENTS.keys()),
+            key="franchise_add"
+        )
+        
+        if st.button("Ajouter cet équipement", type="primary", disabled=not type_eq_valide or not designation or valeur_eq == 0):
+            st.session_state.equipements.append({
+                "type": type_eq,
+                "designation": designation,
+                "valeur": valeur_eq,
+                "duree": duree_eq,
+                "franchise": franchise_eq,
+                "classe": classe_chantier
+            })
+            st.success(f"✅ {designation} ajouté(e) !")
+            st.rerun()
+    
+    # Affichage de la liste des équipements
+    if st.session_state.equipements:
+        st.markdown("**Équipements ajoutés :**")
+        for idx, eq in enumerate(st.session_state.equipements):
+            col1, col2, col3 = st.columns([3, 1, 1])
+            with col1:
+                st.write(f"**{idx+1}. {eq['designation']}** ({eq['type']})")
+                st.caption(f"Valeur: {eq['valeur']:,.0f} FCFA | Durée: {eq['duree']} mois | Franchise: {eq['franchise']}")
+            
+            with col2:
+                # Calcul de la prime pour cet équipement
+                if eq['type'] == "Grue à tour":
+                    taux = get_taux_grue_tour(eq['valeur'], eq['classe'])
+                elif eq['type'] in TARIFS_BARAQUEMENTS:
+                    taux = get_taux_baraquement(eq['type'])
+                else:
+                    taux = get_taux_engin(eq['type'], eq['classe'])
+                
+                coef_franchise = RABAIS_FRANCHISE_EQUIPEMENTS[eq['franchise']]
+                prime_eq = calc_prime_equipement(eq['valeur'], taux, eq['duree'], coef_franchise)
+                st.metric("Prime", f"{prime_eq:,.0f} FCFA")
+            
+            with col3:
+                if st.button("🗑️", key=f"del_{idx}", help="Supprimer"):
+                    st.session_state.equipements.pop(idx)
+                    st.rerun()
+        
+        # Total des primes équipements
+        prime_totale_equipements = sum([
+            calc_prime_equipement(
+                eq['valeur'],
+                get_taux_grue_tour(eq['valeur'], eq['classe']) if eq['type'] == "Grue à tour"
+                else (get_taux_baraquement(eq['type']) if eq['type'] in TARIFS_BARAQUEMENTS
+                      else get_taux_engin(eq['type'], eq['classe'])),
+                eq['duree'],
+                RABAIS_FRANCHISE_EQUIPEMENTS[eq['franchise']]
+            )
+            for eq in st.session_state.equipements
+        ])
+        
+        st.markdown("---")
+        st.metric("**Prime totale Équipements et Installations**", f"**{prime_totale_equipements:,.0f} FCFA**")
+    else:
+        st.info("Aucun équipement ajouté. Utilisez le formulaire ci-dessus pour en ajouter.")
+else:
+    # Si les extensions A21/A22 ne sont pas cochées, réinitialiser la liste
+    if 'equipements' in st.session_state:
+        st.session_state.equipements = []
+    prime_totale_equipements = 0
+
+st.markdown('<div class="divider"></div>', unsafe_allow_html=True)
+
+# ---------------------------------------------------------
+# 7. Saisie manuelle (si montant > 2 milliards OU validation DT OU volontaire)
 # ---------------------------------------------------------
 if mode_manuel:
     st.markdown('<div class="section-title">Tarification manuelle</div>', unsafe_allow_html=True)
@@ -434,14 +756,14 @@ if mode_manuel:
     st.markdown('<div class="divider"></div>', unsafe_allow_html=True)
 
 # ---------------------------------------------------------
-# 7. Bouton de calcul
+# 8. Bouton de calcul
 # ---------------------------------------------------------
 # Désactiver le bouton si: (1) il y a des alertes ET (2) on n'est pas en mode manuel
 desactiver_calcul = (len(alerts) > 0) and not mode_manuel
 calcule = st.button("Calculer la prime", type="primary", use_container_width=True, disabled=desactiver_calcul)
 
 # ---------------------------------------------------------
-# 8. Calculs & Affichage des résultats
+# 9. Calculs & Affichage des résultats
 # ---------------------------------------------------------
 if calcule:
     if mode_manuel:
@@ -505,14 +827,14 @@ if calcule:
             taux_existants = taux_net_travaux * 0.5
             prime_existants = calc_prime(valeur_existants, taux_existants)
 
-        # 8. Primes totales
-        prime_nette = prime_travaux + prime_maintenance + prime_rc + prime_existants
+        # 8. Primes totales (incluant équipements si applicable)
+        prime_nette = prime_travaux + prime_maintenance + prime_rc + prime_existants + prime_totale_equipements
         accessoires = calc_accessoires(prime_nette)
         taxes = calc_taxes(prime_nette, accessoires)
         prime_ttc = prime_nette + accessoires + taxes
 
     # ---------------------------------------------------------
-    # 8. Affichage des résultats
+    # Affichage des résultats
     # ---------------------------------------------------------
     st.markdown('<div class="section-title">Résultats de la cotation</div>', unsafe_allow_html=True)
     
@@ -562,6 +884,14 @@ if calcule:
                 "Taux (‰)": f"{taux_net_travaux * 0.5:.3f}"
             })
         
+        # Prime Équipements (si applicable)
+        if prime_totale_equipements > 0:
+            decomposition_data.append({
+                "Garantie": f"Prime Équipements et Installations (A21/A22) - {len(st.session_state.equipements)} équipement(s)",
+                "Montant (FCFA)": f"{prime_totale_equipements:,.0f}",
+                "Taux (‰)": "-"
+            })
+        
         # Affichage du tableau
         import pandas as pd
         df_decomposition = pd.DataFrame(decomposition_data)
@@ -592,7 +922,7 @@ if calcule:
     if ext_existants: clauses_ext_actives.append(CLAUSES["extensions"]["A20"])
     # Celles soumises à DT
     if ext_maint_etendue: clauses_ext_actives.append(CLAUSES["extensions"]["A06"])
-    if ext_maint_const: clauses_ext_actives.append(CLAVUES["extensions"]["A07"])
+    if ext_maint_const: clauses_ext_actives.append(CLAUSES["extensions"]["A07"])
     if ext_materiel: clauses_ext_actives.append(CLAUSES["extensions"]["A21"])
     if ext_baraquement: clauses_ext_actives.append(CLAUSES["extensions"]["A22"])
     if ext_gemp: clauses_ext_actives.append(CLAUSES["extensions"]["FANAF01"])
