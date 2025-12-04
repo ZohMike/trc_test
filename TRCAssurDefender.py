@@ -921,7 +921,12 @@ def generate_pdf(data):
     pdf.cell(0, 6, clean_text("Responsable Souscription"), 0, 1, 'R')
     pdf.cell(0, 6, clean_text("LEADWAY Assurance"), 0, 1, 'R')
     
-    return bytes(pdf.output())
+    # Compatible avec fpdf2
+    pdf_output = pdf.output()
+    if isinstance(pdf_output, bytes):
+        return pdf_output
+    else:
+        return pdf_output.encode('latin-1')
 
 
 # =========================================================
