@@ -921,22 +921,22 @@ def generate_pdf(data):
     pdf.cell(0, 6, clean_text("Responsable Souscription"), 0, 1, 'R')
     pdf.cell(0, 6, clean_text("LEADWAY Assurance"), 0, 1, 'R')
     
-    # Utiliser BytesIO pour s'assurer d'avoir des bytes
-    from io import BytesIO
-    pdf_output = BytesIO()
-    pdf_bytes = pdf.output()
-    
-    # S'assurer que c'est bien des bytes
-    if isinstance(pdf_bytes, bytes):
-        return pdf_bytes
-    elif isinstance(pdf_bytes, str):
-        return pdf_bytes.encode('latin-1')
-    else:
-        # Pour les objets BytesIO ou similaires
-        if hasattr(pdf_bytes, 'getvalue'):
-            return pdf_bytes.getvalue()
-        else:
-            raise TypeError(f"Type inattendu pour pdf.output(): {type(pdf_bytes)}")
+    # Méthode correcte pour fpdf2 : utiliser dest='S' pour retourner des bytes
+    try:
+        # fpdf2 moderne
+        return pdf.output(dest='S')
+    except TypeError:
+        # fpdf2 ancienne syntaxe
+        try:
+            output = pdf.output(dest='S').encode('latin-1')
+            return output
+        except:
+            # Dernière tentative : sans argument
+            output = pdf.output()
+            if isinstance(output, bytes):
+                return output
+            else:
+                return str(output).encode('latin-1')
 
 
 # =========================================================
