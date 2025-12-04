@@ -921,22 +921,23 @@ def generate_pdf(data):
     pdf.cell(0, 6, clean_text("Responsable Souscription"), 0, 1, 'R')
     pdf.cell(0, 6, clean_text("LEADWAY Assurance"), 0, 1, 'R')
     
-    # Méthode correcte pour fpdf2 : utiliser dest='S' pour retourner des bytes
-    try:
-        # fpdf2 moderne
-        return pdf.output(dest='S')
-    except TypeError:
-        # fpdf2 ancienne syntaxe
-        try:
-            output = pdf.output(dest='S').encode('latin-1')
-            return output
-        except:
-            # Dernière tentative : sans argument
-            output = pdf.output()
-            if isinstance(output, bytes):
-                return output
-            else:
-                return str(output).encode('latin-1')
+    # Obtenir la sortie PDF comme bytes
+    output = pdf.output()
+    
+    # Convertir en bytes selon le type
+    if isinstance(output, bytes):
+        return output
+    elif isinstance(output, bytearray):
+        return bytes(output)
+    elif isinstance(output, memoryview):
+        return output.tobytes()
+    elif hasattr(output, 'getvalue'):  # BytesIO
+        return output.getvalue()
+    elif isinstance(output, str):
+        return output.encode('latin-1')
+    else:
+        # Forcer la conversion en bytes
+        return bytes(output)
 
 
 # =========================================================
