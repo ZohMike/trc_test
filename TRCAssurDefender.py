@@ -917,8 +917,6 @@ def generate_pdf(data):
     pdf.set_font(font_name, "", 10)
     pdf.cell(0, 6, "", 0, 1, 'R')
     pdf.set_font(font_name, "B", 10)
-    pdf.cell(0, 6, clean_text("Alcide Kouassi"), 0, 1, 'R')
-    pdf.cell(0, 6, clean_text("Responsable Souscription"), 0, 1, 'R')
     pdf.cell(0, 6, clean_text("LEADWAY Assurance"), 0, 1, 'R')
     
     # Obtenir la sortie PDF comme bytes
