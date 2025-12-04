@@ -1,4 +1,8 @@
 import streamlit as st
+import base64
+from fpdf import FPDF
+import datetime
+import pandas as pd
 
 # =========================================================
 # CONFIG
@@ -59,7 +63,7 @@ TARIFS_BATIMENT = {
 TARIF_ASSAINISSEMENT = {"12m": 2.21, "18m": 2.55}
 TARIF_ROUTES = {"12m": 1.78, "18m": 2.12}
 
-# NOUVEAU: Options pour la structure (pour le selectbox)
+# Options pour la structure (pour le selectbox)
 STRUCTURE_OPTIONS = {
     "Type A (Béton armé/acier, portée < 10m)": "A",
     "Type B (Acier/précontraint, portée 10-15m)": "B",
@@ -68,9 +72,9 @@ STRUCTURE_OPTIONS = {
 # Coefficients de franchise basés sur les images
 FRANCHISE_COEF = {
     "Normale (x1)": 1.0,
-    "Multipliée par 2 (Rabais 7,5%)": 0.925, # 1 - 0.075
-    "Multipliée par 5 (Rabais 15%)": 0.85,   # 1 - 0.15
-    "Multipliée par 10 (Rabais 25%)": 0.75,  # 1 - 0.25
+    "Multipliée par 2 (Rabais 7,5%)": 0.925,
+    "Multipliée par 5 (Rabais 15%)": 0.85,
+    "Multipliée par 10 (Rabais 25%)": 0.75,
     "Divisée par 2 (Augmentation 25%)": 1.25,
 }
 
@@ -81,7 +85,7 @@ RC_PARAMS = {
     "Route": {"pct": 0.20, "min": 0.40},
 }
 
-# NOUVEAU: Suppléments RC (basés sur les images)
+# Suppléments RC (basés sur les images)
 RC_SUPPLEMENTS = {
     "trafic": {
         "Non applicable": 1.0,
@@ -186,7 +190,7 @@ RABAIS_FRANCHISE_EQUIPEMENTS = {
     "Franchise divisée par 2 (Majoration 25%)": 1.25,
 }
 
-# NOUVEAU: Dictionnaire des clauses
+# Dictionnaire des clauses
 CLAUSES = {
     "obligatoires": {
         "Bâtiment": [
@@ -213,567 +217,1276 @@ CLAUSES = {
         "A06": "Maintenance étendue (clause A06)",
         "A07": "Maintenance constructeur (clause A07)",
         "A17": "Responsabilité Civile Croisée (clause A17)",
-        "A20": "Garantie des biens adjacents / existants (clause A20)",
-        "A21": "Garantie du matériel et des engins de chantier (clause A21)",
-        "A22": "Garantie des Baraquements et Entrepôts (clause A22)",
-        "FANAF01": "Grèves, émeutes et mouvements populaires (clause FANAF 01)",
-    }
+        "A20": "Dommages aux Existants (clause A20)",
+        "A21": "Matériel et installations de chantier (clause A21)",
+        "A22": "Baraquements provisoires (clause A22)",
+        "FANAF01": "Garantie Environnement, Modification Paysagère (clause FANAF01)",
+    },
 }
 
 # =========================================================
-# FONCTIONS DE CALCUL
+# EXCLUSIONS PAR DÉFAUT (Nouveau champ)
 # =========================================================
-def duree_key(duree):
-    """Retourne la clé '12m' ou '18m' selon la durée."""
-    return "12m" if duree <= 12 else "18m"
+EXCLUSIONS_DEFAUT = """- Erosion naturelle
+- Coffrage, cintres et echafaudages
+- Tassement de terrain en dehors des tassements accidentels
+- Dommage cause par les vibrations, la suppression des points d'appuis
+- Frais d'assechement et d'injection
+- Mauvais beton,
+- Greve, Emeute, Mouvement populaire
+- Dommages aux Recoltes Forets Cultures
+- RC Professionnelle,
+- Faute intentionnelle des preposes de l'assure
+- Reserves du bureau de controle
+- Travaux de demolition et travaux sur les structures et murs porteurs"""
 
-def calc_prime(montant, taux_millieme):
-    """Calcule la prime basée sur un montant et un taux pour mille (‰)."""
-    return montant * taux_millieme / 1000
+# =========================================================
+# FONCTIONS
+# =========================================================
 
-def get_taux_base(type_travaux, duree, usage_key=None, structure=None):
-    """Récupère le taux de base pour mille (‰) selon le type de travaux."""
+def get_taux_base(type_travaux, duree, usage_key, structure):
+    """Retourne le taux de base (‰) en fonction du type de travaux"""
+    duree_key = "18m" if duree > 12 else "12m"
+    
     if type_travaux == "Bâtiment":
-        if not usage_key or not structure:
-            st.error("Usage et structure requis pour Bâtiment.")
-            return 0
-        return TARIFS_BATIMENT[usage_key][structure][duree_key(duree)]
+        return TARIFS_BATIMENT[usage_key][structure][duree_key]
     elif type_travaux == "Assainissement":
-        return TARIF_ASSAINISSEMENT[duree_key(duree)]
+        return TARIF_ASSAINISSEMENT[duree_key]
     elif type_travaux == "Route":
-        return TARIF_ROUTES[duree_key(duree)]
-    return 0
+        return TARIF_ROUTES[duree_key]
+    else:
+        return 0.0
 
-# MODIFIÉ: Ajout des suppléments RC
-def calc_taux_rc(type_travaux, taux_travaux, suppl_trafic_key, suppl_proximite_key, rc_croisee=False):
-    """Calcule le taux RC final (‰) incluant les suppléments."""
-    base = RC_PARAMS[type_travaux]
+def calc_prime(montant, taux):
+    """Calcule la prime à partir du montant (FCFA) et du taux (‰)"""
+    return montant * (taux / 1000)
+
+def calc_taux_rc(type_travaux, taux_travaux, trafic_key, prox_key, rc_croisee):
+    """Calcule le taux RC final (‰)"""
+    params = RC_PARAMS[type_travaux]
+    taux_base_rc = max(taux_travaux * params["pct"], params["min"])
     
-    # 1. Taux RC de base (min 0.35‰ ou 0.40‰)
-    taux_rc = max(taux_travaux * base["pct"], base["min"])
+    coef_trafic = RC_SUPPLEMENTS["trafic"][trafic_key]
+    coef_prox = RC_SUPPLEMENTS["proximite"][prox_key]
+    taux_rc = taux_base_rc * coef_trafic * coef_prox
     
-    # 2. Application des suppléments (trafic, proximité)
-    taux_rc *= RC_SUPPLEMENTS["trafic"][suppl_trafic_key]
-    taux_rc *= RC_SUPPLEMENTS["proximite"][suppl_proximite_key]
-    
-    # 3. Application surprime RC Croisée (A17)
     if rc_croisee:
-        taux_rc *= 1.20 # +20% sur le taux RC déjà calculé
-        
+        taux_rc *= 1.10
+    
     return taux_rc
 
 def calc_accessoires(prime_nette):
-    """Calcule les frais accessoires selon le barème."""
-    if prime_nette <= 100_000: return 5_000
-    if prime_nette <= 500_000: return 7_500
-    if prime_nette <= 1_000_000: return 10_000
-    if prime_nette <= 5_000_000: return 15_000
-    if prime_nette <= 10_000_000: return 20_000
-    if prime_nette <= 50_000_000: return 30_000
-    return 50_000
+    """Calcule les accessoires (6% de la prime nette)"""
+    return prime_nette * 0.06
 
-def calc_taxes(prime_nette, accessoires, taux=0.145):
-    """Calcule les taxes (TVA) sur la prime nette + accessoires."""
-    return (prime_nette + accessoires) * taux
+def calc_taxes(prime_nette, accessoires):
+    """Calcule les taxes (14.5% de (prime nette + accessoires))"""
+    return (prime_nette + accessoires) * 0.145
 
-# =========================================================
-# FONCTIONS DE CALCUL - ÉQUIPEMENTS ET INSTALLATIONS
-# =========================================================
-def get_coef_duree_equipement(duree_mois):
-    """Retourne le coefficient de durée pour les équipements."""
-    if duree_mois <= 12:
-        return COEF_DUREE_EQUIPEMENTS.get(duree_mois, 1.0)
-    else:
-        # Si > 12 mois, proratiser (durée/12)
-        return duree_mois / 12.0
-
-def calc_prime_equipement(valeur, taux_annuel, duree_mois, coef_franchise):
+def generate_pdf(data):
     """
-    Calcule la prime pour un équipement.
-    Prime = Valeur × Taux annuel × Coef durée × Coef franchise
+    Génère un PDF de proposition de cotation TRC selon le modèle Leadway Assurance
     """
-    coef_duree = get_coef_duree_equipement(duree_mois)
-    prime = valeur * (taux_annuel / 1000) * coef_duree * coef_franchise
-    return prime
-
-def get_taux_grue_tour(valeur, classe_chantier):
-    """Retourne le taux annuel (‰) pour une grue à tour."""
-    if valeur < 30_000_000:
-        return TARIFS_GRUES_TOUR["< 30M"][classe_chantier]
-    else:
-        return TARIFS_GRUES_TOUR["> 30M"][classe_chantier]
-
-def get_taux_engin(type_engin, classe_chantier):
-    """Retourne le taux annuel (‰) pour un engin mobile."""
-    return TARIFS_ENGINS.get(type_engin, {}).get(classe_chantier, 0)
-
-def get_taux_baraquement(type_baraquement):
-    """Retourne le taux annuel (‰) pour un baraquement."""
-    return TARIFS_BARAQUEMENTS.get(type_baraquement, 0)
-
-# =========================================================
-# INTERFACE UTILISATEUR (UI)
-# =========================================================
-st.title("ASSUR DEFENDER – Tous Risques Chantier (TRC)")
-st.markdown("---")
-
-# ---------------------------------------------------------
-# 1. Informations du projet et des intervenants
-# ---------------------------------------------------------
-st.markdown('<div class="section-title">Informations du projet et des intervenants</div>', unsafe_allow_html=True)
-
-# Sous-section: Informations contractuelles
-st.markdown('<div class="section-subtitle">Informations contractuelles</div>', unsafe_allow_html=True)
-col_info1, col_info2 = st.columns(2)
-souscripteur = col_info1.text_input("Souscripteur", key="souscripteur")
-proposant = col_info2.text_input("Proposant", key="proposant")
-intermediaire = col_info1.text_input("Intermédiaire", key="intermediaire")
-
-st.markdown('<div class="divider"></div>', unsafe_allow_html=True)
-
-# Sous-section: Intervenants du projet
-st.markdown('<div class="section-subtitle">Intervenants du projet</div>', unsafe_allow_html=True)
-col_int1, col_int2 = st.columns(2)
-entreprise_principale = col_int1.text_input("Entreprise Principale", key="entreprise_principale")
-maitre_ouvrage = col_int2.text_input("Maître d'ouvrage", key="maitre_ouvrage")
-maitrise_oeuvre = col_int1.text_input("Maîtrise d'œuvre", key="maitrise_oeuvre")
-bureau_controle = col_int2.text_input("Bureau de Contrôle Technique", key="bureau_controle")
-bureau_etude = col_int1.text_input("Bureau d'étude", key="bureau_etude")
-labo_geotechnique = col_int2.text_input("Laboratoire d'Étude géotechnique", key="labo_geotechnique")
-autres_intervenants = st.text_area("Autres Intervenants", key="autres_intervenants", height=80)
-
-st.markdown('<div class="divider"></div>', unsafe_allow_html=True)
-
-# Sous-section: Description du projet
-st.markdown('<div class="section-subtitle">Description du projet</div>', unsafe_allow_html=True)
-col_desc1, col_desc2 = st.columns(2)
-nature_travaux = col_desc1.text_area("Nature des travaux", key="nature_travaux", height=100)
-situation_geo = col_desc2.text_area("Situation géographique", key="situation_geo", height=100)
-
-st.markdown('<div class="divider"></div>', unsafe_allow_html=True)
-
-# Sous-section: Calendrier et périodes
-st.markdown('<div class="section-subtitle">Calendrier du projet</div>', unsafe_allow_html=True)
-col_cal1, col_cal2, col_cal3 = st.columns(3)
-debut_travaux = col_cal1.date_input("Début des travaux", key="debut_travaux")
-fin_travaux = col_cal2.date_input("Fin des travaux", key="fin_travaux")
-# Calcul automatique de la durée en mois si les deux dates sont renseignées
-if debut_travaux and fin_travaux:
-    duree_calculee = (fin_travaux.year - debut_travaux.year) * 12 + (fin_travaux.month - debut_travaux.month)
-    if duree_calculee < 0:
-        duree_calculee = 0
-    col_cal3.metric("Durée calculée", f"{duree_calculee} mois")
-else:
-    duree_calculee = None
-
-st.markdown('<div class="divider"></div>', unsafe_allow_html=True)
-
-# Sous-section: Maintenance et Essais
-st.markdown('<div class="section-subtitle">Maintenance et Essais</div>', unsafe_allow_html=True)
-col_maint1, col_maint2 = st.columns(2)
-maintenance_incluse = col_maint1.checkbox("Maintenance incluse", key="maintenance_incluse")
-if maintenance_incluse:
-    periode_maintenance = col_maint2.text_input("Période de maintenance", key="periode_maintenance", 
-                                                  placeholder="Ex: 12 mois à compter de la réception")
-else:
-    periode_maintenance = ""
-
-col_essai1, col_essai2 = st.columns(2)
-essai_inclus = col_essai1.checkbox("Essai inclus", key="essai_inclus")
-if essai_inclus:
-    periode_essai = col_essai2.text_input("Période d'essai", key="periode_essai",
-                                           placeholder="Ex: 3 mois")
-else:
-    periode_essai = ""
-
-st.markdown('<div class="divider"></div>', unsafe_allow_html=True)
-
-# ---------------------------------------------------------
-# 2. Informations générales (tarifaires)
-# ---------------------------------------------------------
-st.markdown('<div class="section-title">Informations tarifaires</div>', unsafe_allow_html=True)
-
-# Option de tarification manuelle volontaire au début
-tarif_manuel_volontaire = st.checkbox("Appliquer une tarification manuelle (hors barème)", key="tarif_volontaire_debut")
-
-g1, g2 = st.columns([1, 2])
-type_travaux = g1.selectbox("Type de travaux", ["Bâtiment", "Assainissement", "Route"], key="type_travaux")
-# Montant par défaut à 0
-montant = g1.number_input("Montant du chantier (Valeur à assurer)", min_value=0, value=0, step=10_000_000, format="%d")
-# Utiliser la durée calculée si disponible, sinon 12 par défaut
-duree_defaut = duree_calculee if duree_calculee is not None and duree_calculee > 0 else 12
-duree = g2.number_input("Durée prévisionnelle (en mois)", min_value=1, value=duree_defaut, step=1, 
-                        help="Cette durée sera utilisée pour le calcul tarifaire")
-franchise_key = g2.selectbox("Franchise de base retenue", list(FRANCHISE_COEF.keys()))
-
-# Vérification du dépassement de 2 milliards
-depasse_limite = montant > 2_000_000_000
-mode_manuel = False
-raison_manuel = None  # Peut être: "montant_eleve", "validation_dt", ou "volontaire"
-
-if tarif_manuel_volontaire:
-    mode_manuel = True
-    raison_manuel = "volontaire"
-    st.info("ℹ️ **Mode tarification manuelle activé.** Vous pourrez saisir vos montants à la fin du parcours.")
-elif depasse_limite:
-    st.warning("⚠️ **Le montant du chantier dépasse la limite de 2 milliards FCFA.** Vous devrez saisir les primes manuellement à la fin du parcours.")
-    mode_manuel = True
-    raison_manuel = "montant_eleve"
-
-st.markdown('<div class="divider"></div>', unsafe_allow_html=True)
-
-# ---------------------------------------------------------
-# 3. Paramètres spécifiques
-# ---------------------------------------------------------
-st.markdown('<div class="section-title">Paramètres tarifaires spécifiques</div>', unsafe_allow_html=True)
-
-usage_key = None
-structure = None
-
-if type_travaux == "Bâtiment":
-    p1, p2 = st.columns(2)
-    usage_label = p1.selectbox(
-        "Usage du bâtiment",
-        [
-            "Logements / bureaux / hôtels / magasins (max R+4)",
-            "Usage public / industriel / écoles / usines",
-        ],
-    )
-    usage_key = (
-        "logement_commercial"
-        if "Logements" in usage_label
-        else "public_industriel"
-    )
-    # MODIFICATION: Remplacement de st.radio par st.selectbox
-    structure_label = p2.selectbox(
-        "Type de structure",
-        list(STRUCTURE_OPTIONS.keys())
-    )
-    structure = STRUCTURE_OPTIONS[structure_label]
-else:
-    st.info("Ce type de travaux n'a pas de sous-paramètre (usage/structure).")
-
-st.markdown('<div class="divider"></div>', unsafe_allow_html=True)
-
-# ---------------------------------------------------------
-# 4. Données techniques & Éligibilité
-# ---------------------------------------------------------
-st.markdown('<div class="section-title">Éligibilité du chantier</div>', unsafe_allow_html=True)
-st.write("Veuillez confirmer que le chantier respecte les conditions du barème.")
-
-# --- NOUVELLE REORGANISATION (Grille de 2 colonnes) ---
-cond_montant = montant <= 2_000_000_000
-
-# Initialiser les conditions spécifiques
-cond_fondations = "Oui"
-cond_sol_difficile = "Oui"
-cond_inondation = "Oui"
-
-# Créer une grille de 2 colonnes pour tous les Criteres
-c1, c2 = st.columns(2)
-
-# Criteres Communs
-cond_maintenance_12m = c1.radio("Période de maintenance ≤ 12 mois ?", ["Oui", "Non"], horizontal=True, index=0)
-cond_interruption = c2.radio("Reprise après interruption ?", ["Non", "Oui"], horizontal=True, index=0)
-cond_proc_habituels = c1.radio("Procédés habituels ?", ["Oui", "Non"], horizontal=True, index=0)
-
-# Criteres Spécifiques (placés dans la colonne 2 ou 1 pour équilibrer)
-if type_travaux == "Bâtiment":
-    cond_fondations = c2.radio("Réhabilitation SANS travaux sur fondations ?", ["Oui", "Non"], horizontal=True, index=0)
-    cond_sol_difficile = c1.radio("Absence de conditions de sol difficiles (nappe, pieux) ?", ["Oui", "Non"], horizontal=True, index=0)
-elif type_travaux == "Route":
-    cond_sol_difficile = c2.radio("Absence de conditions de sol difficiles (nappe, fondations profondes) ?", ["Oui", "Non"], horizontal=True, index=0)
-elif type_travaux == "Assainissement":
-    cond_inondation = c2.radio("Travaux PEU exposés aux inondations ?", ["Oui", "Non"], horizontal=True, index=0)
-
-# Vérification des alertes (logique mise à jour pour correspondre aux variables)
-alerts = []
-# Ne pas ajouter d'alerte pour le montant si on est déjà en mode manuel (> 2 Mds)
-if not cond_montant and not mode_manuel:
-    alerts.append(f"Montant ({montant:,.0f} FCFA) > 2 Mds FCFA")
-if cond_maintenance_12m == "Non":
-    alerts.append("Maintenance > 12 mois")
-if cond_interruption == "Oui":
-    alerts.append("Reprise après interruption")
-if cond_proc_habituels == "Non":
-    alerts.append("Procédés non-habituels")
-
-if type_travaux == "Bâtiment":
-    if cond_fondations == "Non":
-        alerts.append("Travaux sur fondations (existantes/nouvelles)")
-    if cond_sol_difficile == "Non":
-        alerts.append("Conditions de sol difficiles (nappe, pieux, parois)")
-elif type_travaux == "Route":
-    if cond_sol_difficile == "Non":
-        alerts.append("Conditions de sol difficiles (nappe, fondations profondes)")
-elif type_travaux == "Assainissement":
-    if cond_inondation == "Non":
-        alerts.append("Travaux exposés aux inondations")
-
-if alerts:
-    st.error("⚠️ **Dossier à soumettre à la Direction Technique pour dérogation/tarification :**\n• " + "\n• ".join(alerts))
-    # Proposer le mode manuel pour ces cas également
-    continuer_avec_dt = st.checkbox("La Direction Technique a validé le dossier et fourni une tarification manuelle", key="continuer_dt")
-    if continuer_avec_dt:
-        mode_manuel = True
-        raison_manuel = "validation_dt"
-else:
-    st.success("✅ **Chantier éligible à la tarification du barème.**")
-
-
-
-st.markdown('<div class="divider"></div>', unsafe_allow_html=True)
-
-# ---------------------------------------------------------
-# 5. Documents requis
-# ---------------------------------------------------------
-st.markdown('<div class="section-title">Documents requis</div>', unsafe_allow_html=True)
-
-d1, d2, d3 = st.columns(3)
-doc1 = d1.file_uploader("Questionnaire TRC", type=["pdf", "doc", "docx"], key="doc1")
-doc2 = d2.file_uploader("CCTP (Cahier des clauses techniques)", type=["pdf", "doc", "docx"], key="doc2")
-doc3 = d3.file_uploader("Descriptif technique des travaux", type=["pdf", "doc", "docx"], key="doc3")
-
-d4, d5, d6 = st.columns(3)
-doc4 = d4.file_uploader("Rapport d'étude de sol", type=["pdf", "doc", "docx"], key="doc4")
-doc5 = d5.file_uploader("Planning des travaux", type=["pdf", "doc", "docx", "xlsx", "xls", "mpp"], key="doc5")
-if type_travaux == "Route":
-    doc6 = d6.file_uploader("Ouvrages d'art (caractéristiques et coût)", type=["pdf", "doc", "docx", "xlsx", "xls"], key="doc6")
-else:
-    doc6 = None
-
-manquants = []
-if not doc1: manquants.append("Questionnaire TRC")
-if not doc2: manquants.append("CCTP")
-if not doc3: manquants.append("Descriptif technique")
-if not doc4: manquants.append("Étude de sol")
-if not doc5: manquants.append("Planning")
-if type_travaux == "Route" and not doc6: manquants.append("Ouvrages d'art")
-
-if manquants:
-    st.warning("Veuillez joindre les documents qui vous ont aidé à l'appréciation du risque : " + ", ".join(manquants))
-else:
-    st.success("✅ **Tous les documents requis ont été joints.**")
-
-st.markdown('<div class="divider"></div>', unsafe_allow_html=True)
-
-# ---------------------------------------------------------
-# 6. Extensions de garantie
-# ---------------------------------------------------------
-st.markdown('<div class="section-title">Extensions de garantie</div>', unsafe_allow_html=True)
-
-# NOUVEAU: Suppléments RC
-st.markdown('<div class="section-subtitle">Garantie Responsabilité Civile (RC)</div>', unsafe_allow_html=True)
-ext_rc = st.checkbox("Inclure la Responsabilité Civile (A17)", value=True)
-
-rc1, rc2 = st.columns(2)
-rc_suppl_trafic_key = rc1.selectbox(
-    "Supp. RC : Rues et places publiques adjacentes",
-    list(RC_SUPPLEMENTS["trafic"].keys()),
-    disabled=not ext_rc
-)
-rc_suppl_prox_key = rc2.selectbox(
-    "Supp. RC : Immeubles ou ouvrages de proximité",
-    list(RC_SUPPLEMENTS["proximite"].keys()),
-    disabled=not ext_rc
-)
-ext_rc_croisee = st.checkbox("Inclure RC croisée (surprime +20% sur la prime RC)", disabled=not ext_rc)
-
-# Autres extensions
-st.markdown('<div class="section-subtitle">Autres garanties (sur taux travaux)</div>', unsafe_allow_html=True)
-e1, e2, e3 = st.columns(3)
-ext_deblais = e1.checkbox("Frais de déblais (+0,15‰)", help="Ajoute 0,15‰ au taux travaux. Limité à 5% du montant sinistre.")
-ext_maintenance = e2.checkbox("Maintenance visite (A05)", help="Prime additionnelle = 10% de la prime travaux de base.")
-ext_existants = e3.checkbox("Dommages aux existants (A20)", help="Couvre les biens existants jusqu'à 20% du montant des travaux, avec un taux de 50% du taux net travaux.")
-
-# NOUVEAU: Extensions soumises à DT
-# MODIFICATION: Organisation en grille 3x2
-st.markdown('<div class="section-subtitle">Garanties additionnelles (soumises à la Direction Technique)</div>', unsafe_allow_html=True)
-dt1, dt2, dt3 = st.columns(3)
-ext_gemp = dt1.checkbox("Grèves, Émeutes, Mvts Pop. (FANAF 01)")
-ext_maint_etendue = dt2.checkbox("Maintenance étendue (A06)")
-ext_maint_const = dt3.checkbox("Maintenance constructeur (A07)")
-
-# Deuxième ligne pour l'alignement
-dt4, dt5, dt6 = st.columns(3)
-ext_materiel = dt4.checkbox("Matériel et engins de chantier (A21)")
-ext_baraquement = dt5.checkbox("Baraquements et Entrepôts (A22)")
-
-extensions_dt = []
-if ext_gemp: extensions_dt.append("Grèves/Émeutes (FANAF 01)")
-if ext_maint_etendue: extensions_dt.append("Maintenance étendue (A06)")
-if ext_maint_const: extensions_dt.append("Maintenance constructeur (A07)")
-if ext_materiel: extensions_dt.append("Matériel (A21)")
-if ext_baraquement: extensions_dt.append("Baraquements (A22)")
-
-if extensions_dt:
-    st.info("ℹ️ **Les extensions suivantes nécessitent une tarification manuelle de la Direction Technique :** " + ", ".join(extensions_dt))
-
-st.markdown('<div class="divider"></div>', unsafe_allow_html=True)
-
-# ---------------------------------------------------------
-# 5bis. ÉQUIPEMENTS ET INSTALLATIONS DE CHANTIER (A21, A22)
-# ---------------------------------------------------------
-# Cette section n'apparaît que si les clauses A21 ou A22 sont cochées
-if ext_materiel or ext_baraquement:
-    st.markdown('<div class="section-title">Équipements et Installations de Chantier</div>', unsafe_allow_html=True)
-    st.info("ℹ️ Cette section permet de tarifer les équipements et installations de chantier (A21, A22). Chaque équipement est tarifé individuellement selon sa classe de risque, sa durée et sa franchise.")
+    from fpdf import FPDF
+    import datetime
     
-    # Classification du chantier
-    st.markdown('<div class="section-subtitle">Classification du chantier</div>', unsafe_allow_html=True)
-    st.markdown("**Classe de risque du chantier**")
-    st.markdown("""
-    - **Classe 1** : Chantiers situés en zones isolées non inondables, terrains plats ou à faibles déclivités ; pas d'excavation profonde, pas de tranchée importante.
-    - **Classe 2** : Chantiers situés en zones soumises à possibilités d'inondations ; excavations profondes, tranchées ; terrains difficiles (déclivités, risques de glissements).
-    - **Classe 3** : Chantiers en zones très exposées ; possibilité d'inondations, tempête ou tremblement de terre ; travaux en montagne, fortes déclivités, risques de chutes de roches, glissement de terrains, etc.
-    """)
+    pdf = FPDF()
+    pdf.add_page()
+    pdf.set_auto_page_break(auto=True, margin=15)
     
-    classe_chantier = st.selectbox(
-        "Sélectionnez la classe",
-        ["Classe 1", "Classe 2", "Classe 3"],
-        label_visibility="collapsed"
-    )
-    
-    # Initialisation de la liste des équipements dans session_state
-    if 'equipements' not in st.session_state:
-        st.session_state.equipements = []
-    
-    st.markdown('<div class="section-subtitle">Liste des équipements à assurer</div>', unsafe_allow_html=True)
-    
-    # Formulaire d'ajout d'équipement
-    with st.expander("➕ Ajouter un équipement", expanded=len(st.session_state.equipements) == 0):
-        type_eq = st.selectbox(
-            "Type d'équipement",
-            ["--- Grues ---", "Grue à tour", "Grue automobile", 
-             "--- Engins mobiles ---", "Bulldozers, niveleuses, scrapers", "Chargeurs, dumpers", 
-             "Compacteurs vibrants", "Sonnettes / extracteurs de pieux", "Rouleaux compresseurs", 
-             "Locomotives de chantier",
-             "--- Baraquements ---", "Baraquement de stockage", "Bureaux provisoires de chantier"],
-            key="type_eq_add"
-        )
+    def table_row_multicell(pdf, widths, texts, height=5, align=['L','C','C','C'], border=1, fill=False, font_style=''):
+        """
+        Crée une ligne de tableau avec support multi-lignes pour chaque cellule.
+        widths: liste des largeurs de colonnes
+        texts: liste des textes pour chaque colonne
+        height: hauteur de ligne minimale
+        align: alignement pour chaque colonne
+        border: style de bordure (0=aucune, 1=bordure)
+        fill: remplissage de fond
+        font_style: style de police ('B' pour gras, '' pour normal)
+        """
+        # Sauvegarder la position de départ
+        start_x = pdf.get_x()
+        start_y = pdf.get_y()
         
-        # Ne pas permettre de sélectionner les séparateurs
-        if type_eq.startswith("---"):
-            st.warning("Veuillez sélectionner un type d'équipement valide")
-            type_eq_valide = False
-        else:
-            type_eq_valide = True
-            
-        col_eq1, col_eq2 = st.columns(2)
-        designation = col_eq1.text_input("Désignation / Description", key="design_add")
-        valeur_eq = col_eq2.number_input("Valeur à neuf (FCFA)", min_value=0, value=0, step=100_000, format="%d", key="valeur_add")
+        # Sauvegarder le style de police actuel
+        current_font = pdf.font_family
+        current_size = pdf.font_size_pt
+        current_style = pdf.font_style
         
-        col_eq3, col_eq4 = st.columns(2)
-        duree_eq = col_eq3.number_input("Durée de présence (mois)", min_value=1, max_value=36, value=12, key="duree_add")
-        franchise_eq = col_eq4.selectbox(
-            "Franchise",
-            list(RABAIS_FRANCHISE_EQUIPEMENTS.keys()),
-            key="franchise_add"
-        )
+        # Appliquer le style si spécifié
+        if font_style:
+            pdf.set_font(current_font, font_style, current_size)
         
-        if st.button("Ajouter cet équipement", type="primary", disabled=not type_eq_valide or not designation or valeur_eq == 0):
-            st.session_state.equipements.append({
-                "type": type_eq,
-                "designation": designation,
-                "valeur": valeur_eq,
-                "duree": duree_eq,
-                "franchise": franchise_eq,
-                "classe": classe_chantier
-            })
-            st.success(f"✅ {designation} ajouté(e) !")
-            st.rerun()
-    
-    # Affichage de la liste des équipements
-    if st.session_state.equipements:
-        st.markdown("**Équipements ajoutés :**")
-        for idx, eq in enumerate(st.session_state.equipements):
-            col1, col2, col3 = st.columns([3, 1, 1])
-            with col1:
-                st.write(f"**{idx+1}. {eq['designation']}** ({eq['type']})")
-                st.caption(f"Valeur: {eq['valeur']:,.0f} FCFA | Durée: {eq['duree']} mois | Franchise: {eq['franchise']}")
-            
-            with col2:
-                # Calcul de la prime pour cet équipement
-                if eq['type'] == "Grue à tour":
-                    taux = get_taux_grue_tour(eq['valeur'], eq['classe'])
-                elif eq['type'] in TARIFS_BARAQUEMENTS:
-                    taux = get_taux_baraquement(eq['type'])
-                else:
-                    taux = get_taux_engin(eq['type'], eq['classe'])
+        # Calculer la hauteur maximale nécessaire pour chaque cellule
+        max_height = height
+        for i, (width, text) in enumerate(zip(widths, texts)):
+            if text:
+                # Utiliser multi_cell en mode split_only pour calculer le nombre de lignes
+                temp_y = pdf.get_y()
+                temp_x = pdf.get_x()
+                pdf.set_xy(start_x, start_y)
                 
-                coef_franchise = RABAIS_FRANCHISE_EQUIPEMENTS[eq['franchise']]
-                prime_eq = calc_prime_equipement(eq['valeur'], taux, eq['duree'], coef_franchise)
-                st.metric("Prime", f"{prime_eq:,.0f} FCFA")
+                # Calculer combien de lignes nécessaires
+                lines = pdf.multi_cell(width, height, text, border=0, align=align[i], split_only=True)
+                num_lines = len(lines) if lines else 1
+                cell_height = num_lines * height
+                
+                if cell_height > max_height:
+                    max_height = cell_height
+                
+                pdf.set_xy(temp_x, temp_y)
+        
+        # Dessiner les bordures de la ligne complète
+        if border:
+            pdf.rect(start_x, start_y, sum(widths), max_height)
+            # Dessiner les séparateurs verticaux
+            x_pos = start_x
+            for width in widths[:-1]:
+                x_pos += width
+                pdf.line(x_pos, start_y, x_pos, start_y + max_height)
+        
+        # Remplir chaque cellule avec le texte
+        x_pos = start_x
+        for i, (width, text, alignment) in enumerate(zip(widths, texts, align)):
+            pdf.set_xy(x_pos, start_y)
             
-            with col3:
-                if st.button("🗑️", key=f"del_{idx}", help="Supprimer"):
+            # Dessiner le texte sans bordure (déjà dessinée)
+            if text:
+                # Calculer le nombre de lignes pour ce texte
+                lines = pdf.multi_cell(width, height, '', border=0, align=alignment, split_only=True)
+                num_lines = len(pdf.multi_cell(width, height, text, border=0, align=alignment, split_only=True)) if text else 1
+                text_height = num_lines * height
+                
+                # Centrer verticalement si le texte est plus court que max_height
+                y_offset = (max_height - text_height) / 2 if text_height < max_height else 0
+                pdf.set_xy(x_pos, start_y + y_offset)
+            
+            # Écrire le texte
+            pdf.multi_cell(width, height, text, border=0, align=alignment, fill=fill)
+            
+            x_pos += width
+        
+        # Restaurer le style de police original
+        pdf.set_font(current_font, current_style, current_size)
+        
+        # Se positionner après la ligne
+        pdf.set_xy(start_x, start_y + max_height)
+    
+    # Utiliser DejaVu pour supporter UTF-8
+    try:
+        pdf.add_font('DejaVu', '', '/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf', uni=True)
+        pdf.add_font('DejaVu', 'B', '/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf', uni=True)
+        font_name = "DejaVu"
+    except:
+        font_name = "Arial"
+    
+    def clean_text(text):
+        if font_name == "Arial":
+            replacements = {
+                'œ': 'oe', 'Œ': 'OE', 'à': 'a', 'â': 'a', 'ä': 'a',
+                'é': 'e', 'è': 'e', 'ê': 'e', 'ë': 'e',
+                'î': 'i', 'ï': 'i', 'ô': 'o', 'ö': 'o',
+                'ù': 'u', 'û': 'u', 'ü': 'u', 'ç': 'c',
+                'À': 'A', 'Â': 'A', 'Ä': 'A',
+                'É': 'E', 'È': 'E', 'Ê': 'E', 'Ë': 'E',
+                'Î': 'I', 'Ï': 'I', 'Ô': 'O', 'Ö': 'O',
+                'Ù': 'U', 'Û': 'U', 'Ü': 'U', 'Ç': 'C'
+            }
+            for old, new in replacements.items():
+                text = text.replace(old, new)
+        return text
+    
+    def format_amount_fr(amount):
+        """Formats a number with space as a thousand separator and no decimal part."""
+        # Use locale-independent formatting, then replace comma with space
+        # Assumes f-string formatting uses comma for thousands in the environment
+        return f"{amount:,.0f}".replace(",", " ")
+
+    
+    # ============================================================
+    # PAGE 1 - EN-TÊTE ET INFORMATIONS GÉNÉRALES
+    # ============================================================
+    
+    # Logo et date
+    pdf.set_font(font_name, "B", 12)
+    pdf.cell(100, 10, clean_text("LEADWAY"), 0, 0, 'L')
+    today = datetime.date.today()
+    pdf.cell(0, 10, clean_text(f"Abidjan, le {today.strftime('%d.%m.%Y')}"), 0, 1, 'R')
+    pdf.set_font(font_name, "", 10)
+    pdf.cell(100, 5, clean_text("Assurance"), 0, 1, 'L')
+    pdf.ln(5)
+    
+    # BANDEAU JAUNE - TITRE PRINCIPAL
+    pdf.set_fill_color(255, 204, 0)
+    pdf.set_font(font_name, "B", 16)
+    pdf.cell(0, 10, clean_text("OFFRE D'ASSURANCE"), 0, 1, 'C', fill=True)
+    pdf.set_font(font_name, "B", 14)
+    pdf.cell(0, 8, clean_text("TOUS RISQUES CHANTIER"), 0, 1, 'C', fill=True)
+    pdf.set_font(font_name, "B", 12)
+    prospect_text = f"Prospect : {data.get('souscripteur', 'N/A').upper()}"
+    pdf.cell(0, 8, clean_text(prospect_text), 0, 1, 'C', fill=True)
+    
+    pdf.ln(5)
+    pdf.set_font(font_name, "", 9)
+    intro_text = f"Comme suite a votre demande de cotation du {data.get('date_demande', today.strftime('%d/%m/%Y'))} nous vous presentons ci-dessous les conditions de garanties et de primes pour la couverture TRC sollicitee."
+    pdf.multi_cell(0, 5, clean_text(intro_text), 0, 'L')
+    
+    pdf.ln(5)
+    
+    # SECTION 1 : CARACTÉRISTIQUES DU RISQUE
+    pdf.set_font(font_name, "B", 11)
+    pdf.cell(0, 8, clean_text("1.    CARACTERISTIQUES DU RISQUE"), 0, 1, 'L')
+    pdf.ln(2)
+    
+    pdf.set_font(font_name, "", 9)
+    
+    # Informations en tableau 2 colonnes
+    caracteristiques_data = [
+        ("Nom ou raison sociale", data.get('souscripteur', ''), 
+         "Duree des travaux", f"{data.get('duree', '')} mois (Date de debut a preciser)"),
+        ("Situation du chantier", data.get('situation_geo', ''), 
+         "Maitre d'ouvrage", data.get('maitre_ouvrage', '')),
+        ("Nature du chantier", data.get('nature_travaux', ''), 
+         "Maitre d'oeuvre", data.get('maitrise_oeuvre', '')),
+        ("", "", 
+         "Controle Technique", data.get('bureau_controle', 'A nous communiquer')),
+        ("Montant des travaux", f"{format_amount_fr(data.get('montant', 0))} F CFA", 
+         "Duree de Maintenance", f"{data.get('duree_maintenance', '12')} mois"),
+    ]
+    
+    for left_label, left_value, right_label, right_value in caracteristiques_data:
+        # Colonne gauche
+        if left_label:
+            pdf.set_font(font_name, "B", 9)
+            pdf.cell(45, 6, clean_text(left_label), 0, 0, 'L')
+            pdf.set_font(font_name, "", 9)
+            pdf.cell(50, 6, clean_text(f": {left_value}"), 0, 0, 'L')
+        else:
+            pdf.cell(95, 6, "", 0, 0, 'L')
+        
+        # Colonne droite
+        if right_label:
+            pdf.set_font(font_name, "B", 9)
+            pdf.cell(40, 6, clean_text(right_label), 0, 0, 'L')
+            pdf.set_font(font_name, "", 9)
+            pdf.cell(0, 6, clean_text(f": {right_value}"), 0, 1, 'L')
+        else:
+            pdf.ln()
+    
+    pdf.ln(5)
+    
+    # SECTION 2 : GARANTIES ACCORDEES
+    pdf.set_font(font_name, "B", 11)
+    pdf.cell(0, 8, clean_text("2.    GARANTIES ACCORDEES"), 0, 1, 'L')
+    pdf.ln(2)
+    
+    pdf.set_font(font_name, "", 9)
+    pdf.cell(10, 6, clean_text("-"), 0, 0, 'L')
+    pdf.cell(0, 6, clean_text("Dommages directs a l'ouvrage"), 0, 1, 'L')
+    pdf.cell(10, 6, clean_text("-"), 0, 0, 'L')
+    pdf.cell(0, 6, clean_text("RC+ RC Croisee"), 0, 1, 'L')
+    
+    pdf.ln(5)
+    
+    # ============================================================
+    # SECTION 3 : PRIMES (Anciennement Section 4)
+    # ============================================================
+    
+    pdf.set_font(font_name, "B", 11)
+    pdf.cell(0, 8, clean_text("3.    PRIMES"), 0, 1, 'L')
+    pdf.ln(2)
+    
+    # Tableau des primes
+    pdf.set_font(font_name, "", 9)
+    
+    primes_data = [
+        ("Prime nette previsionnelle Initiale", format_amount_fr(data.get('prime_nette', 0)), "F CFA"),
+        ("Reduction commerciale", format_amount_fr(data.get('reduction_commerciale', 0)), "F CFA"),
+        ("Prime nette previsionnelle finale", format_amount_fr(data.get('prime_nette_finale', data.get('prime_nette', 0))), "F CFA"),
+        ("Accessoires", format_amount_fr(data.get('accessoires', 0)), "F CFA"),
+        ("Taxes", format_amount_fr(data.get('taxes', 0)), "F CFA"),
+    ]
+    
+    for label, value, devise in primes_data:
+        pdf.set_font(font_name, "B", 9)
+        pdf.cell(80, 6, clean_text(label), 0, 0, 'L')
+        pdf.set_font(font_name, "", 9)
+        pdf.cell(10, 6, ":", 0, 0, 'C')
+        pdf.cell(50, 6, clean_text(value), 0, 0, 'R')
+        pdf.cell(0, 6, clean_text(devise), 0, 1, 'L')
+    
+    # Prime TTC
+    pdf.set_fill_color(255, 204, 0)
+    pdf.set_font(font_name, "B", 10)
+    pdf.cell(80, 7, clean_text("Prime TTC"), 0, 0, 'L', fill=True)
+    pdf.cell(10, 7, ":", 0, 0, 'C', fill=True)
+    pdf.cell(50, 7, format_amount_fr(data.get('prime_ttc', 0)), 0, 0, 'R', fill=True)
+    pdf.cell(0, 7, clean_text("F CFA"), 0, 1, 'L', fill=True)
+    
+    pdf.ln(10)
+    
+    # ============================================================
+    # SECTION 4 : LIMITES DE GARANTIES ET FRANCHISES (Anciennement Section 3)
+    # ============================================================
+    
+    pdf.add_page() # Ajout d'un saut de page
+    
+    pdf.set_font(font_name, "B", 11)
+    pdf.cell(0, 8, clean_text("4.    LIMITES DE GARANTIES ET FRANCHISES"), 0, 1, 'L')
+    pdf.ln(2)
+    
+    pdf.set_font(font_name, "", 9)
+    territoire_text = "Les garanties s'exercent exclusivement sur le territoire ivoirien."
+    pdf.multi_cell(0, 5, clean_text(territoire_text), 0, 'L')
+    
+    pdf.ln(3)
+    
+    # TABLEAU DES GARANTIES
+    
+    # En-tête du tableau
+    pdf.set_fill_color(255, 204, 0)  # Jaune
+    pdf.set_font(font_name, "B", 9)
+    
+    # Ajustement des largeurs de colonnes
+    col1_w = 95  # Désignation des garanties (inchangé)
+    col2_w = 25  # Statut (Réduit de 30 à 25)
+    col3_w = 30  # Capitaux (Réduit de 35 à 30)
+    col4_w = 40  # Franchises (Augmenté de 30 à 40)
+    
+    pdf.cell(col1_w, 6, clean_text("DESIGNATION DES GARANTIES"), 1, 0, 'C', fill=True)
+    pdf.cell(col2_w, 6, clean_text("STATUT"), 1, 0, 'C', fill=True)
+    pdf.cell(col3_w, 6, clean_text("CAPITAUX"), 1, 0, 'C', fill=True)
+    pdf.cell(col4_w, 6, clean_text("FRANCHISES"), 1, 1, 'C', fill=True)
+    
+    # I- DOMMAGES DIRECTS A L'OUVRAGE
+    pdf.set_fill_color(200, 200, 200)  # Gris clair
+    pdf.set_font(font_name, "B", 9)
+    pdf.cell(col1_w + col2_w + col3_w + col4_w, 6, clean_text("I-        DOMMAGES DIRECTS A L'OUVRAGE"), 1, 1, 'L', fill=True)
+    
+    pdf.set_font(font_name, "", 7)
+    
+    # Période des travaux (Ligne 1)
+    table_row_multicell(pdf, 
+                       [col1_w, col2_w, col3_w, col4_w],
+                       [clean_text("Periode des travaux"), 
+                        clean_text("Garanti"), 
+                        format_amount_fr(data.get('montant', 0)), 
+                        clean_text("Evnts. Naturels et maintenance")],
+                       height=5,
+                       align=['L', 'C', 'R', 'C'],
+                       font_style='B')
+    
+    # Période de maintenance (Ligne 2)
+    table_row_multicell(pdf, 
+                       [col1_w, col2_w, col3_w, col4_w],
+                       [clean_text("Periode de maintenance"), 
+                        clean_text("Garanti"), 
+                        format_amount_fr(data.get('montant', 0)), 
+                        clean_text("10% mini 15 000 000")],
+                       height=5,
+                       align=['L', 'C', 'R', 'C'],
+                       font_style='B')
+    
+    # Extension de garanties (ligne titre)
+    table_row_multicell(pdf, 
+                       [col1_w, col2_w, col3_w, col4_w],
+                       [clean_text("Extension de garanties"), "", "", ""],
+                       height=5,
+                       align=['L', 'C', 'C', 'C'],
+                       font_style='B')
+    
+    # Liste complète des extensions selon l'image - DYNAMIQUE
+    
+    # Honoraires d'expert
+    honoraires_statut = "Garanti" if data.get('ext_honoraires_expert') else "Exclu"
+    honoraires_cap = data.get('honoraires_capitaux', '') if data.get('ext_honoraires_expert') else ''
+    honoraires_fran = data.get('honoraires_franchises', '') if data.get('ext_honoraires_expert') else ''
+    table_row_multicell(pdf, 
+                       [col1_w, col2_w, col3_w, col4_w],
+                       [clean_text("Honoraires d'expert"), 
+                        clean_text(honoraires_statut), 
+                        clean_text(honoraires_cap if honoraires_cap else 'Selon bareme des experts'), 
+                        clean_text(honoraires_fran)],
+                       height=5,
+                       align=['L', 'C', 'R', 'C'])
+    
+    # Dommages aux biens et existants
+    existants_statut = "Garanti" if data.get('ext_existants') else "Exclu"
+    existants_cap = data.get('existants_capitaux', '') if data.get('ext_existants') else ''
+    existants_fran = data.get('existants_franchises', '') if data.get('ext_existants') else ''
+    table_row_multicell(pdf, 
+                       [col1_w, col2_w, col3_w, col4_w],
+                       [clean_text("Dommages aux biens et existants"), 
+                        clean_text(existants_statut), 
+                        clean_text(existants_cap), 
+                        clean_text(existants_fran)],
+                       height=5,
+                       align=['L', 'C', 'R', 'C'])
+    
+    # Erreur de conception
+    erreur_statut = "Garanti" if data.get('ext_erreur_conception') else "Exclu"
+    erreur_cap = data.get('erreur_capitaux', '') if data.get('ext_erreur_conception') else ''
+    erreur_fran = data.get('erreur_franchises', '') if data.get('ext_erreur_conception') else ''
+    table_row_multicell(pdf, 
+                       [col1_w, col2_w, col3_w, col4_w],
+                       [clean_text("Erreur de conception (Y compris parties viciees)"), 
+                        clean_text(erreur_statut), 
+                        clean_text(erreur_cap), 
+                        clean_text(erreur_fran)],
+                       height=5,
+                       align=['L', 'C', 'R', 'C'])
+    
+    # Engins de chantier
+    engins_statut = "Garanti" if (data.get('ext_materiel') or data.get('ext_baraquement')) else "Exclu"
+    engins_cap = data.get('materiel_capitaux', '') if data.get('ext_materiel') else ''
+    engins_fran = data.get('materiel_franchises', '') if data.get('ext_materiel') else ''
+    table_row_multicell(pdf, 
+                       [col1_w, col2_w, col3_w, col4_w],
+                       [clean_text("Engins de chantier"), 
+                        clean_text(engins_statut), 
+                        clean_text(engins_cap), 
+                        clean_text(engins_fran)],
+                       height=5,
+                       align=['L', 'C', 'C', 'C'])
+    
+    # Heures supplémentaires
+    heures_statut = "Garanti" if data.get('ext_heures_suppl') else "Exclu"
+    heures_cap = data.get('heures_capitaux', '') if data.get('ext_heures_suppl') else ''
+    heures_fran = data.get('heures_franchises', '') if data.get('ext_heures_suppl') else ''
+    table_row_multicell(pdf, 
+                       [col1_w, col2_w, col3_w, col4_w],
+                       [clean_text("Heures supplementaires, Travail de nuit, Transport a grande vitesse"), 
+                        clean_text(heures_statut), 
+                        clean_text(heures_cap), 
+                        clean_text(heures_fran)],
+                       height=5,
+                       align=['L', 'C', 'R', 'C'])
+    
+    # Vol des biens entreposés
+    vol_statut = "Garanti" if data.get('ext_vol_entrepose') else "Exclu"
+    vol_cap = data.get('vol_entrepose_capitaux', '') if data.get('ext_vol_entrepose') else ''
+    vol_fran = data.get('vol_entrepose_franchises', '') if data.get('ext_vol_entrepose') else ''
+    table_row_multicell(pdf, 
+                       [col1_w, col2_w, col3_w, col4_w],
+                       [clean_text("Vol des biens entreposes hors chantier"), 
+                        clean_text(vol_statut), 
+                        clean_text(vol_cap), 
+                        clean_text(vol_fran)],
+                       height=5,
+                       align=['L', 'C', 'R', 'C'])
+    
+    # Transport terrestre
+    trans_terr_statut = "Garanti" if data.get('ext_transport_terrestre') else "Exclu"
+    trans_terr_cap = data.get('transport_terrestre_capitaux', '') if data.get('ext_transport_terrestre') else ''
+    trans_terr_fran = data.get('transport_terrestre_franchises', '') if data.get('ext_transport_terrestre') else ''
+    table_row_multicell(pdf, 
+                       [col1_w, col2_w, col3_w, col4_w],
+                       [clean_text("Transport terrestre"), 
+                        clean_text(trans_terr_statut), 
+                        clean_text(trans_terr_cap), 
+                        clean_text(trans_terr_fran)],
+                       height=5,
+                       align=['L', 'C', 'R', 'C'])
+    
+    # Transport aérien
+    trans_aer_statut = "Garanti" if data.get('ext_transport_aerien') else "Exclu"
+    trans_aer_cap = data.get('transport_aerien_capitaux', '') if data.get('ext_transport_aerien') else ''
+    trans_aer_fran = data.get('transport_aerien_franchises', '') if data.get('ext_transport_aerien') else ''
+    table_row_multicell(pdf, 
+                       [col1_w, col2_w, col3_w, col4_w],
+                       [clean_text("Transport aerien"), 
+                        clean_text(trans_aer_statut), 
+                        clean_text(trans_aer_cap), 
+                        clean_text(trans_aer_fran)],
+                       height=5,
+                       align=['L', 'C', 'R', 'C'])
+    
+    # Baraquement
+    baraq_statut = "Garanti" if data.get('ext_baraquement') else "Exclu"
+    baraq_cap = data.get('baraquement_capitaux', '') if data.get('ext_baraquement') else ''
+    baraq_fran = data.get('baraquement_franchises', '') if data.get('ext_baraquement') else ''
+    table_row_multicell(pdf, 
+                       [col1_w, col2_w, col3_w, col4_w],
+                       [clean_text("Baraquement, entrepot, bureaux provisoires"), 
+                        clean_text(baraq_statut), 
+                        clean_text(baraq_cap), 
+                        clean_text(baraq_fran)],
+                       height=5,
+                       align=['L', 'C', 'R', 'C'])
+    
+    # Conduits et Souterrains
+    conduits_statut = "Garanti" if data.get('ext_conduits_souterrains') else "Exclu"
+    conduits_cap = data.get('conduits_capitaux', '') if data.get('ext_conduits_souterrains') else ''
+    conduits_fran = data.get('conduits_franchises', '') if data.get('ext_conduits_souterrains') else ''
+    table_row_multicell(pdf, 
+                       [col1_w, col2_w, col3_w, col4_w],
+                       [clean_text("Conduits et Souterrains"), 
+                        clean_text(conduits_statut), 
+                        clean_text(conduits_cap), 
+                        clean_text(conduits_fran)],
+                       height=5,
+                       align=['L', 'C', 'R', 'C'])
+    
+    # Tempête, GEMP
+    gemp_statut = "Garanti" if data.get('ext_gemp') else "Exclu"
+    gemp_cap = data.get('gemp_capitaux', '') if data.get('ext_gemp') else ''
+    gemp_fran = "10% mini 15 000 000" if data.get('ext_gemp') else ''
+    table_row_multicell(pdf, 
+                       [col1_w, col2_w, col3_w, col4_w],
+                       [clean_text("Tempete, Ouragan, Cyclone, GEMP inondation"), 
+                        clean_text(gemp_statut), 
+                        clean_text(gemp_cap if gemp_cap else format_amount_fr(data.get('montant', 0))), 
+                        clean_text(gemp_fran)],
+                       height=5,
+                       align=['L', 'C', 'R', 'C'])
+    
+    # Frais de déblai
+    deblai_statut = "Garanti" if data.get('ext_deblais') else "Exclu"
+    table_row_multicell(pdf, 
+                       [col1_w, col2_w, col3_w, col4_w],
+                       [clean_text("Frais de deblai et demolition"), 
+                        clean_text(deblai_statut), 
+                        clean_text("5% de l'indemnite" if data.get('ext_deblais') else ''), 
+                        clean_text("Neant" if data.get('ext_deblais') else '')],
+                       height=5,
+                       align=['L', 'C', 'R', 'C'])
+    
+    # II- RC + RC CROISEE
+    pdf.set_fill_color(200, 200, 200)
+    pdf.set_font(font_name, "B", 9)
+    rc_title = "RC + RC CROISEE"
+    pdf.cell(col1_w + col2_w + col3_w + col4_w, 6, clean_text(rc_title), 1, 1, 'L', fill=True)
+    
+    pdf.set_font(font_name, "", 7)
+    
+    # Statut RC
+    rc_statut = "Garanti" if data.get('ext_rc') else "Exclu"
+    rc_cap = data.get('rc_capitaux', '') if data.get('ext_rc') else ''
+    rc_fran = data.get('rc_franchises', '') if data.get('ext_rc') else ''
+    
+    # Ligne 2: Tous Dommages confondus dont
+    table_row_multicell(pdf, 
+                       [col1_w, col2_w, col3_w, col4_w],
+                       [clean_text("Tous Dommages confondus dont"), "", clean_text(rc_cap if rc_cap else ''), ""],
+                       height=5,
+                       align=['L', 'C', 'R', 'C'])
+    
+    # Ligne 3: Dommages matériels et immatériels consécutifs
+    table_row_multicell(pdf, 
+                       [col1_w, col2_w, col3_w, col4_w],
+                       [clean_text("- Dommages materiels et immateriels consecutifs avec un capital epuisable pour la duree des travaux"),
+                        clean_text("Garanti" if data.get('ext_rc') else "Exclu"),
+                        clean_text("500 000 000" if data.get('ext_rc') else ''),
+                        ""],
+                       height=5,
+                       align=['L', 'C', 'R', 'C'])
+    
+    # Ligne 4: Vol par préposés au préjudice des tiers
+    vol_prep_statut = "Garanti" if data.get('ext_vol_preposes') else "Exclu"
+    vol_prep_cap = data.get('vol_preposes_capitaux', '') if data.get('ext_vol_preposes') else ''
+    vol_prep_fran = data.get('vol_preposes_franchises', '') if data.get('ext_vol_preposes') else ''
+    
+    vol_cap_text = ""
+    if data.get('ext_vol_preposes'):
+        vol_cap_text = clean_text("10% des dommages materiels dans la limite de 50 000 000")
+    
+    table_row_multicell(pdf, 
+                       [col1_w, col2_w, col3_w, col4_w],
+                       [clean_text("- Vol par preposes au prejudice des tiers"),
+                        clean_text(vol_prep_statut),
+                        vol_cap_text,
+                        ""],
+                       height=5,
+                       align=['L', 'C', 'C', 'C'])
+    
+    # Ligne 5: Défense et Recours
+    defense_statut = "Garanti" if data.get('ext_defense_recours') else "Exclu"
+    defense_cap = data.get('defense_recours_capitaux', '') if data.get('ext_defense_recours') else ''
+    defense_fran = data.get('defense_recours_franchises', '') if data.get('ext_defense_recours') else ''
+    
+    table_row_multicell(pdf, 
+                       [col1_w, col2_w, col3_w, col4_w],
+                       [clean_text("Defense et Recours"),
+                        clean_text(defense_statut),
+                        clean_text(defense_cap if defense_cap else "1 000 000"),
+                        clean_text(defense_fran)],
+                       height=5,
+                       align=['L', 'C', 'R', 'C'])
+    
+    pdf.ln(5)
+    
+    # ============================================================
+    # SECTION 5 : EXCLUSIONS (Vérification de la Correction Robuste)
+    # ============================================================
+    
+    pdf.set_font(font_name, "B", 11)
+    pdf.cell(0, 8, clean_text("5.    EXCLUSIONS"), 0, 1, 'L')
+    pdf.ln(2)
+    
+    pdf.set_font(font_name, "", 9)
+    pdf.multi_cell(0, 5, clean_text("En plus des exclusions habituelles, sont egalement exclus :"), 0, 'L')
+    pdf.ln(2)
+    
+    # Utilisation du contenu du champ exclusions (passé via data)
+    exclusions_content = data.get('exclusions_spe', EXCLUSIONS_DEFAUT)
+    exclusions_list = [line.strip() for line in exclusions_content.split('\n') if line.strip()]
+    
+    pdf.set_font(font_name, "", 8)
+    
+    # Paramètres de largeur pour la correction de l'erreur FPDF
+    puce_indent = 5 # Indentation pour la puce (x)
+
+    for exclusion in exclusions_list:
+        
+        # Enlever le tiret si l'utilisateur l'a laissé
+        if exclusion.startswith('- '):
+            exclusion = exclusion[2:] 
+        
+        # 1. On se repositionne à la marge gauche (par défaut)
+        pdf.set_x(pdf.l_margin) 
+        
+        # 2. On affiche le tiret dans une petite cellule qui ne fait PAS de saut de ligne (ln=0)
+        pdf.cell(puce_indent, 5, "-", 0, 0, 'L') 
+        
+        # 3. On affiche le texte restant dans une multi_cell (0 pour la largeur prend le reste de la ligne).
+        pdf.multi_cell(0, 5, clean_text(exclusion), 0, 'L')
+    
+    pdf.ln(5)
+    
+    # SECTION 6 : DOCUMENTS À TRANSMETTRE
+    pdf.set_font(font_name, "B", 11)
+    pdf.cell(0, 8, clean_text("6.    DOCUMENTS A TRANSMETTRE"), 0, 1, 'L')
+    pdf.ln(2)
+    
+    pdf.set_font(font_name, "", 9)
+    pdf.set_text_color(255, 0, 0)
+    pdf.multi_cell(0, 5, clean_text("La presente offre est soumise au prospect sous reserve de la transmission obligatoire des documents suivants avant souscription :"), 0, 'L')
+    pdf.set_text_color(0, 0, 0)
+    pdf.ln(2)
+    
+    documents_list = [
+        "Cahier des Clauses Techniques et Particulieres (CCTP)",
+        "Planning detaille des travaux",
+        "Descriptif technique des travaux",
+        "Rapport geotechnique (Etude de sol)",
+    ]
+    
+    pdf.set_font(font_name, "", 8)
+    for doc in documents_list:
+        pdf.cell(10, 5, "_", 0, 0, 'L')
+        pdf.cell(0, 5, clean_text(doc), 0, 1, 'L')
+    
+    pdf.ln(5)
+    
+    # SECTION 7 : CLAUSES À JOINDRE AU CONTRAT
+    pdf.set_font(font_name, "B", 11)
+    pdf.cell(0, 8, clean_text("7.    CLAUSES A JOINDRE AU CONTRAT"), 0, 1, 'L')
+    pdf.ln(2)
+    
+    clauses_list = [
+        "Installations de lutte contre les Incendies (clause C01)",
+        "Conditions speciales concernant les mesures de securite contre les pluies, ruissellements et inondations (clause C06)",
+        "Maintenance etendue (clause A06)",
+        "Garantie heures supplementaires et expeditions a grande Vitesse (A11)",
+        "Transport Terrestre (A13)",
+        "Responsabilite Civile Croisee (clause A17)",
+        "Planning des travaux (Clause B14)",
+        "Mesures de securite contre les pluies, ruissellements et inondations (clause C06)",
+        "Garantie des biens adjacents et/ou des biens existants (Clause A20)",
+        "Garantie des Baraquements et Entrepots de chantier (Clause A22)",
+    ]
+    
+    pdf.set_font(font_name, "", 8)
+    for clause in clauses_list:
+        pdf.cell(10, 5, "_", 0, 0, 'L')
+        pdf.cell(0, 5, clean_text(clause), 0, 1, 'L')
+    
+    pdf.ln(5)
+    
+    # Note finale
+    pdf.set_font(font_name, "B", 9)
+    pdf.set_text_color(255, 0, 0)
+    note_finale = "NB : La presente offre est soumise au prospect sous reserve du placement en reassurance facultative de l'excedent de capitaux sur cette affaire."
+    pdf.multi_cell(0, 5, clean_text(note_finale), 0, 'L')
+    pdf.set_text_color(0, 0, 0)
+    
+    pdf.ln(10)
+    
+    # Signature
+    pdf.set_font(font_name, "", 10)
+    pdf.cell(0, 6, "", 0, 1, 'R')
+    pdf.set_font(font_name, "B", 10)
+    pdf.cell(0, 6, clean_text("Alcide Kouassi"), 0, 1, 'R')
+    pdf.cell(0, 6, clean_text("Responsable Souscription"), 0, 1, 'R')
+    pdf.cell(0, 6, clean_text("LEADWAY Assurance"), 0, 1, 'R')
+    
+    return bytes(pdf.output())
+
+
+# =========================================================
+# INITIALISATION SESSION STATE
+# =========================================================
+if 'equipements' not in st.session_state:
+    st.session_state.equipements = []
+
+# =========================================================
+# INTERFACE PRINCIPALE
+# =========================================================
+
+st.title("🏗️ Cotation TRC - Assur Defender")
+st.markdown("**Tous Risques Chantier** - Outil de tarification")
+
+# Section 1 : Informations générales
+st.markdown('<div class="section-title">1. Informations générales</div>', unsafe_allow_html=True)
+
+col1, col2 = st.columns(2)
+with col1:
+    souscripteur = st.text_input("Souscripteur")
+    proposant = st.text_input("Proposant")
+    intermediaire = st.text_input("Intermédiaire")
+    entreprise_principale = st.text_input("Entreprise principale")
+
+with col2:
+    maitre_ouvrage = st.text_input("Maître d'ouvrage")
+    maitrise_oeuvre = st.text_input("Maîtrise d'œuvre")
+    bureau_controle = st.text_input("Bureau de contrôle")
+    labo_geotechnique = st.text_input("Laboratoire géotechnique")
+
+autres_intervenants = st.text_area("Autres intervenants", height=100)
+
+# Section 2 : Nature des travaux
+st.markdown('<div class="divider"></div>', unsafe_allow_html=True)
+st.markdown('<div class="section-title">2. Nature des travaux</div>', unsafe_allow_html=True)
+
+nature_travaux = st.text_area("Description des travaux", height=150)
+situation_geo = st.text_area("Situation géographique", height=100)
+
+# Section 3 : Période et durée
+st.markdown('<div class="divider"></div>', unsafe_allow_html=True)
+st.markdown('<div class="section-title">3. Période et durée des travaux</div>', unsafe_allow_html=True)
+
+col1, col2, col3 = st.columns(3)
+with col1:
+    debut_travaux = st.date_input("Début des travaux", datetime.date.today())
+with col2:
+    fin_travaux = st.date_input("Fin des travaux", datetime.date.today() + datetime.timedelta(days=365))
+with col3:
+    duree = st.number_input("Durée (mois)", min_value=1, max_value=60, value=12)
+
+# Maintenance et essai
+col1, col2 = st.columns(2)
+with col1:
+    maintenance_incluse = st.checkbox("Maintenance incluse")
+    if maintenance_incluse:
+        periode_maintenance = st.text_input("Période de maintenance")
+    else:
+        periode_maintenance = None
+
+with col2:
+    essai_inclus = st.checkbox("Essai inclus")
+    if essai_inclus:
+        periode_essai = st.text_input("Période d'essai")
+    else:
+        periode_essai = None
+
+# Section 4 : Type de travaux et montant
+st.markdown('<div class="divider"></div>', unsafe_allow_html=True)
+st.markdown('<div class="section-title">4. Type de travaux et montant</div>', unsafe_allow_html=True)
+
+type_travaux = st.selectbox(
+    "Type de travaux",
+    ["Bâtiment", "Assainissement", "Route"]
+)
+
+montant = st.number_input(
+    "Montant des travaux (FCFA)",
+    min_value=0,
+    value=100000000,
+    step=1000000,
+    format="%d"
+)
+
+# Champs spécifiques pour les bâtiments
+if type_travaux == "Bâtiment":
+    usage_display = st.selectbox(
+        "Usage du bâtiment",
+        ["Logement ou commercial", "Public ou industriel"]
+    )
+    usage_key = "logement_commercial" if "Logement" in usage_display else "public_industriel"
+    
+    structure_display = st.selectbox("Structure", list(STRUCTURE_OPTIONS.keys()))
+    structure = STRUCTURE_OPTIONS[structure_display]
+else:
+    usage_key = None
+    structure = None
+
+# Section 5 : Franchise
+st.markdown('<div class="divider"></div>', unsafe_allow_html=True)
+st.markdown('<div class="section-title">5. Franchise</div>', unsafe_allow_html=True)
+
+franchise_key = st.selectbox("Franchise", list(FRANCHISE_COEF.keys()))
+
+# Section 6 : Extensions de garantie
+st.markdown('<div class="divider"></div>', unsafe_allow_html=True)
+st.markdown('<div class="section-title">6. Extensions de garantie</div>', unsafe_allow_html=True)
+
+st.markdown('<div class="section-subtitle">Extensions standards (incluses automatiquement)</div>', unsafe_allow_html=True)
+ext_maintenance = st.checkbox("A05 - Maintenance Visite (10% de la prime travaux)", value=True)
+ext_deblais = st.checkbox("Déblais, démolition et frais de déblaiement (+0.15‰)", value=True)
+
+st.markdown('<div class="section-subtitle">Extension DOMMAGES DIRECTS À L\'OUVRAGE</div>', unsafe_allow_html=True)
+
+# Nouvelles extensions
+ext_honoraires_expert = st.checkbox("Honoraires d'expert")
+if ext_honoraires_expert:
+    st.markdown("**Capitaux et Franchises:**")
+    col1, col2 = st.columns(2)
+    with col1:
+        honoraires_capitaux = st.text_input("Capitaux Garantis (FCFA)", value="", key="honoraires_capitaux")
+    with col2:
+        honoraires_franchises = st.text_input("Franchises (FCFA)", value="", key="honoraires_franchises")
+    st.markdown("---")
+else:
+    honoraires_capitaux = ""
+    honoraires_franchises = ""
+
+ext_erreur_conception = st.checkbox("Erreur de conception (Y compris parties viciées)")
+if ext_erreur_conception:
+    st.markdown("**Capitaux et Franchises:**")
+    col1, col2 = st.columns(2)
+    with col1:
+        erreur_capitaux = st.text_input("Capitaux Garantis (FCFA)", value="", key="erreur_capitaux")
+    with col2:
+        erreur_franchises = st.text_input("Franchises (FCFA)", value="", key="erreur_franchises")
+    st.markdown("---")
+else:
+    erreur_capitaux = ""
+    erreur_franchises = ""
+
+ext_heures_suppl = st.checkbox("Heures supplémentaires, Travail de nuit, Transport à grande vitesse")
+if ext_heures_suppl:
+    st.markdown("**Capitaux et Franchises:**")
+    col1, col2 = st.columns(2)
+    with col1:
+        heures_capitaux = st.text_input("Capitaux Garantis (FCFA)", value="", key="heures_capitaux")
+    with col2:
+        heures_franchises = st.text_input("Franchises (FCFA)", value="", key="heures_franchises")
+    st.markdown("---")
+else:
+    heures_capitaux = ""
+    heures_franchises = ""
+
+ext_vol_entrepose = st.checkbox("Vol des biens entreposés hors chantier")
+if ext_vol_entrepose:
+    st.markdown("**Capitaux et Franchises:**")
+    col1, col2 = st.columns(2)
+    with col1:
+        vol_entrepose_capitaux = st.text_input("Capitaux Garantis (FCFA)", value="", key="vol_entrepose_capitaux")
+    with col2:
+        vol_entrepose_franchises = st.text_input("Franchises (FCFA)", value="", key="vol_entrepose_franchises")
+    st.markdown("---")
+else:
+    vol_entrepose_capitaux = ""
+    vol_entrepose_franchises = ""
+
+ext_transport_terrestre = st.checkbox("Transport terrestre")
+if ext_transport_terrestre:
+    st.markdown("**Capitaux et Franchises:**")
+    col1, col2 = st.columns(2)
+    with col1:
+        transport_terrestre_capitaux = st.text_input("Capitaux Garantis (FCFA)", value="", key="transport_terrestre_capitaux")
+    with col2:
+        transport_terrestre_franchises = st.text_input("Franchises (FCFA)", value="", key="transport_terrestre_franchises")
+    st.markdown("---")
+else:
+    transport_terrestre_capitaux = ""
+    transport_terrestre_franchises = ""
+
+ext_transport_aerien = st.checkbox("Transport aérien")
+if ext_transport_aerien:
+    st.markdown("**Capitaux et Franchises:**")
+    col1, col2 = st.columns(2)
+    with col1:
+        transport_aerien_capitaux = st.text_input("Capitaux Garantis (FCFA)", value="", key="transport_aerien_capitaux")
+    with col2:
+        transport_aerien_franchises = st.text_input("Franchises (FCFA)", value="", key="transport_aerien_franchises")
+    st.markdown("---")
+else:
+    transport_aerien_capitaux = ""
+    transport_aerien_franchises = ""
+
+ext_conduits_souterrains = st.checkbox("Conduits et Souterrains")
+if ext_conduits_souterrains:
+    st.markdown("**Capitaux et Franchises:**")
+    col1, col2 = st.columns(2)
+    with col1:
+        conduits_capitaux = st.text_input("Capitaux Garantis (FCFA)", value="", key="conduits_capitaux")
+    with col2:
+        conduits_franchises = st.text_input("Franchises (FCFA)", value="", key="conduits_franchises")
+    st.markdown("---")
+else:
+    conduits_capitaux = ""
+    conduits_franchises = ""
+
+ext_existants = st.checkbox("A20 - Dommages aux Existants (20% du montant travaux)")
+if ext_existants:
+    st.markdown("**Capitaux et Franchises:**")
+    col1, col2 = st.columns(2)
+    with col1:
+        existants_capitaux = st.text_input("Capitaux Garantis (FCFA)", value="", key="existants_capitaux")
+    with col2:
+        existants_franchises = st.text_input("Franchises (FCFA)", value="", key="existants_franchises")
+    st.markdown("---")
+else:
+    existants_capitaux = ""
+    existants_franchises = ""
+
+# Section RC + RC croisée
+st.markdown('<div class="section-subtitle">RC + RC croisée</div>', unsafe_allow_html=True)
+
+ext_rc = st.checkbox("A17 - Responsabilité civile")
+
+if ext_rc:
+    st.markdown("**Paramètres A17 - Responsabilité civile:**")
+    col1, col2 = st.columns(2)
+    with col1:
+        rc_suppl_trafic_key = st.selectbox(
+            "Supplément trafic",
+            list(RC_SUPPLEMENTS["trafic"].keys())
+        )
+    with col2:
+        rc_suppl_prox_key = st.selectbox(
+            "Supplément proximité bâtiments",
+            list(RC_SUPPLEMENTS["proximite"].keys())
+        )
+    ext_rc_croisee = st.checkbox("RC Croisée (+10%)")
+    
+    st.markdown("**Capitaux et Franchises:**")
+    col1, col2 = st.columns(2)
+    with col1:
+        rc_capitaux_garantis = st.text_input("Capitaux Garantis (FCFA)", value="", key="rc_capitaux")
+    with col2:
+        rc_franchises = st.text_input("Franchises (FCFA)", value="", key="rc_franchises")
+    st.markdown("---")
+else:
+    rc_suppl_trafic_key = "Non applicable"
+    rc_suppl_prox_key = "Non applicable"
+    ext_rc_croisee = False
+    rc_capitaux_garantis = ""
+    rc_franchises = ""
+
+ext_vol_preposes = st.checkbox("Vol par préposés au préjudice des tiers")
+if ext_vol_preposes:
+    st.markdown("**Capitaux et Franchises:**")
+    col1, col2 = st.columns(2)
+    with col1:
+        vol_preposes_capitaux = st.text_input("Capitaux Garantis (FCFA)", value="", key="vol_capitaux")
+    with col2:
+        vol_preposes_franchises = st.text_input("Franchises (FCFA)", value="", key="vol_franchises")
+    st.markdown("---")
+else:
+    vol_preposes_capitaux = ""
+    vol_preposes_franchises = ""
+
+ext_defense_recours = st.checkbox("Défense et Recours")
+if ext_defense_recours:
+    st.markdown("**Capitaux et Franchises:**")
+    col1, col2 = st.columns(2)
+    with col1:
+        defense_recours_capitaux = st.text_input("Capitaux Garantis (FCFA)", value="", key="defense_capitaux")
+    with col2:
+        defense_recours_franchises = st.text_input("Franchises (FCFA)", value="", key="defense_franchises")
+    st.markdown("---")
+else:
+    defense_recours_capitaux = ""
+    defense_recours_franchises = ""
+
+# Extensions nécessitant validation DT
+st.markdown('<div class="section-subtitle">Extensions nécessitant validation Direction Technique</div>', unsafe_allow_html=True)
+
+ext_maint_etendue = st.checkbox("A06 - Maintenance étendue (Validation DT requise)")
+if ext_maint_etendue:
+    st.markdown("**Capitaux et Franchises:**")
+    col1, col2 = st.columns(2)
+    with col1:
+        maint_etendue_capitaux = st.text_input("Capitaux Garantis (FCFA)", value="", key="maint_etendue_capitaux")
+    with col2:
+        maint_etendue_franchises = st.text_input("Franchises (FCFA)", value="", key="maint_etendue_franchises")
+    
+    prime_maint_etendue = st.number_input(
+        "Prime A06 - Maintenance étendue (FCFA)",
+        min_value=0.0,
+        value=0.0,
+        step=10000.0,
+        key="prime_maint_etendue"
+    )
+    st.markdown("---")
+else:
+    maint_etendue_capitaux = ""
+    maint_etendue_franchises = ""
+    prime_maint_etendue = 0.0
+
+ext_maint_const = st.checkbox("A07 - Maintenance constructeur (Validation DT requise)")
+if ext_maint_const:
+    st.markdown("**Capitaux et Franchises:**")
+    col1, col2 = st.columns(2)
+    with col1:
+        maint_const_capitaux = st.text_input("Capitaux Garantis (FCFA)", value="", key="maint_const_capitaux")
+    with col2:
+        maint_const_franchises = st.text_input("Franchises (FCFA)", value="", key="maint_const_franchises")
+    
+    prime_maint_const = st.number_input(
+        "Prime A07 - Maintenance constructeur (FCFA)",
+        min_value=0.0,
+        value=0.0,
+        step=10000.0,
+        key="prime_maint_const"
+    )
+    st.markdown("---")
+else:
+    maint_const_capitaux = ""
+    maint_const_franchises = ""
+    prime_maint_const = 0.0
+
+ext_materiel = st.checkbox("A21 - Matériel et installations de chantier (Validation DT requise)")
+if ext_materiel:
+    st.markdown("**Capitaux et Franchises:**")
+    col1, col2 = st.columns(2)
+    with col1:
+        materiel_capitaux = st.text_input("Capitaux Garantis (FCFA)", value="", key="materiel_capitaux")
+    with col2:
+        materiel_franchises = st.text_input("Franchises (FCFA)", value="", key="materiel_franchises")
+    
+    prime_materiel = st.number_input(
+        "Prime A21 - Matériel et installations (FCFA)",
+        min_value=0.0,
+        value=0.0,
+        step=10000.0,
+        key="prime_materiel"
+    )
+    st.markdown("---")
+else:
+    materiel_capitaux = ""
+    materiel_franchises = ""
+    prime_materiel = 0.0
+
+ext_baraquement = st.checkbox("A22 - Baraquements provisoires (Validation DT requise)")
+if ext_baraquement:
+    st.markdown("**Capitaux et Franchises:**")
+    col1, col2 = st.columns(2)
+    with col1:
+        baraquement_capitaux = st.text_input("Capitaux Garantis (FCFA)", value="", key="baraquement_capitaux")
+    with col2:
+        baraquement_franchises = st.text_input("Franchises (FCFA)", value="", key="baraquement_franchises")
+    
+    prime_baraquement = st.number_input(
+        "Prime A22 - Baraquements provisoires (FCFA)",
+        min_value=0.0,
+        value=0.0,
+        step=10000.0,
+        key="prime_baraquement"
+    )
+    st.markdown("---")
+else:
+    baraquement_capitaux = ""
+    baraquement_franchises = ""
+    prime_baraquement = 0.0
+
+ext_gemp = st.checkbox("FANAF01 - Garantie Environnement Modification Paysagère (Validation DT requise)")
+if ext_gemp:
+    st.markdown("**Capitaux et Franchises:**")
+    col1, col2 = st.columns(2)
+    with col1:
+        gemp_capitaux = st.text_input("Capitaux Garantis (FCFA)", value="", key="gemp_capitaux")
+    with col2:
+        gemp_franchises = st.text_input("Franchises (FCFA)", value="", key="gemp_franchises")
+    
+    prime_gemp = st.number_input(
+        "Prime FANAF01 - Garantie Environnement (FCFA)",
+        min_value=0.0,
+        value=0.0,
+        step=10000.0,
+        key="prime_gemp"
+    )
+    st.markdown("---")
+else:
+    gemp_capitaux = ""
+    gemp_franchises = ""
+    prime_gemp = 0.0
+
+# Section 7 : Équipements et installations (A21/A22)
+st.markdown('<div class="divider"></div>', unsafe_allow_html=True)
+st.markdown('<div class="section-title">7. Équipements et installations de chantier</div>', unsafe_allow_html=True)
+
+if ext_materiel or ext_baraquement:
+    st.info("ℹ️ Cette section nécessite la validation de la Direction Technique.")
+    
+    # Gestion des équipements
+    st.markdown('<div class="section-subtitle">Ajouter un équipement</div>', unsafe_allow_html=True)
+    
+    type_equipement = st.selectbox(
+        "Type d'équipement",
+        ["Grue à tour", "Grue automobile", "Bulldozers, niveleuses, scrapers", 
+         "Chargeurs, dumpers", "Compacteurs vibrants", "Sonnettes / extracteurs de pieux",
+         "Rouleaux compresseurs", "Locomotives de chantier", "Baraquement de stockage",
+         "Bureaux provisoires de chantier"]
+    )
+    
+    col1, col2 = st.columns(2)
+    with col1:
+        valeur_equipement = st.number_input("Valeur à neuf (FCFA)", min_value=0, value=10000000, step=1000000)
+    with col2:
+        duree_equipement = st.selectbox("Durée (mois)", list(range(1, 13)))
+    
+    # Champs spécifiques selon le type
+    if type_equipement == "Grue à tour":
+        hauteur_grue = st.selectbox("Hauteur grue", ["< 30M", "> 30M"])
+        classe_grue = st.selectbox("Classe", ["Classe 1", "Classe 2", "Classe 3"])
+    elif type_equipement in TARIFS_ENGINS:
+        hauteur_grue = None
+        classe_grue = st.selectbox("Classe", ["Classe 1", "Classe 2", "Classe 3"])
+    else:
+        hauteur_grue = None
+        classe_grue = None
+    
+    franchise_equipement = st.selectbox(
+        "Franchise",
+        list(RABAIS_FRANCHISE_EQUIPEMENTS.keys())
+    )
+    
+    if st.button("➕ Ajouter l'équipement"):
+        equipement = {
+            "type": type_equipement,
+            "valeur": valeur_equipement,
+            "duree": duree_equipement,
+            "hauteur": hauteur_grue,
+            "classe": classe_grue,
+            "franchise": franchise_equipement
+        }
+        st.session_state.equipements.append(equipement)
+        st.success("✅ Équipement ajouté!")
+    
+    # Affichage des équipements
+    if st.session_state.equipements:
+        st.markdown('<div class="section-subtitle">Équipements ajoutés</div>', unsafe_allow_html=True)
+        
+        for idx, eq in enumerate(st.session_state.equipements):
+            col1, col2 = st.columns([4, 1])
+            with col1:
+                details = f"**{eq['type']}** - {eq['valeur']:,.0f}".replace(",", " ") + f" FCFA - {eq['duree']} mois"
+                if eq['classe']:
+                    details += f" - {eq['classe']}"
+                if eq['hauteur']:
+                    details += f" - {eq['hauteur']}"
+                st.write(details)
+            with col2:
+                if st.button("🗑️ Supprimer", key=f"del_{idx}"):
                     st.session_state.equipements.pop(idx)
                     st.rerun()
+    
+    # Calcul de la prime équipements
+    prime_totale_equipements = 0
+    for eq in st.session_state.equipements:
+        # Déterminer le taux annuel
+        if eq['type'] == "Grue à tour":
+            taux_annuel = TARIFS_GRUES_TOUR[eq['hauteur']][eq['classe']]
+        elif eq['type'] in TARIFS_ENGINS:
+            taux_annuel = TARIFS_ENGINS[eq['type']][eq['classe']]
+        else:
+            taux_annuel = TARIFS_BARAQUEMENTS[eq['type']]
         
-        # Total des primes équipements
-        prime_totale_equipements = sum([
-            calc_prime_equipement(
-                eq['valeur'],
-                get_taux_grue_tour(eq['valeur'], eq['classe']) if eq['type'] == "Grue à tour"
-                else (get_taux_baraquement(eq['type']) if eq['type'] in TARIFS_BARAQUEMENTS
-                      else get_taux_engin(eq['type'], eq['classe'])),
-                eq['duree'],
-                RABAIS_FRANCHISE_EQUIPEMENTS[eq['franchise']]
-            )
-            for eq in st.session_state.equipements
-        ])
+        # Appliquer le coefficient de durée
+        coef_duree = COEF_DUREE_EQUIPEMENTS[eq['duree']]
+        taux_ajuste = taux_annuel * coef_duree
         
-        st.markdown("---")
-        st.metric("**Prime totale Équipements et Installations**", f"**{prime_totale_equipements:,.0f} FCFA**")
-    else:
-        st.info("Aucun équipement ajouté. Utilisez le formulaire ci-dessus pour en ajouter.")
+        # Appliquer le rabais franchise
+        rabais_franchise = RABAIS_FRANCHISE_EQUIPEMENTS[eq['franchise']]
+        taux_final = taux_ajuste * rabais_franchise
+        
+        # Calculer la prime
+        prime_eq = calc_prime(eq['valeur'], taux_final)
+        prime_totale_equipements += prime_eq
 else:
-    # Si les extensions A21/A22 ne sont pas cochées, réinitialiser la liste
-    if 'equipements' in st.session_state:
-        st.session_state.equipements = []
     prime_totale_equipements = 0
 
+# =========================================================
+# Section 8 : Exclusions et Mode manuel (Intégration du nouveau champ)
+# =========================================================
 st.markdown('<div class="divider"></div>', unsafe_allow_html=True)
+st.markdown('<div class="section-title">8. Exclusions et Mode de tarification</div>', unsafe_allow_html=True)
 
-# ---------------------------------------------------------
-# 7. Saisie manuelle (si montant > 2 milliards OU validation DT OU volontaire)
-# ---------------------------------------------------------
+# NOUVEAU CHAMP D'EXCLUSIONS
+exclusions_spe = st.text_area(
+    "Exclusions spécifiques (une exclusion par ligne)",
+    value=EXCLUSIONS_DEFAUT,
+    height=250
+)
+
+st.markdown('<div class="section-subtitle">Mode de tarification</div>', unsafe_allow_html=True)
+
+# Vérifications pour information uniquement
+montant_depasse = montant > 2000000000
+
+extensions_dt = ext_maint_etendue or ext_maint_const or ext_materiel or ext_baraquement or ext_gemp
+
+# Affichage des informations (non bloquantes)
+if montant_depasse:
+    st.info("ℹ️ Le montant dépasse 2 milliards FCFA - Vous pouvez continuer avec le calcul automatique ou utiliser la tarification manuelle.")
+if extensions_dt:
+    st.info("ℹ️ Des extensions nécessitant validation DT sont sélectionnées. N'oubliez pas de saisir les primes correspondantes.")
+
+# Mode manuel
+mode_manuel = st.checkbox("Activer la tarification manuelle (hors barème)")
+
 if mode_manuel:
-    st.markdown('<div class="section-title">Tarification manuelle</div>', unsafe_allow_html=True)
+    raison_manuel = st.radio(
+        "Raison de la tarification manuelle",
+        ["montant_eleve", "validation_dt", "volontaire"],
+        format_func=lambda x: {
+            "montant_eleve": "Montant > 2 milliards FCFA",
+            "validation_dt": "Extensions nécessitant validation DT",
+            "volontaire": "Choix volontaire (hors barème)"
+        }[x]
+    )
     
-    # Déterminer le message approprié selon le contexte
-    if raison_manuel == "montant_eleve":
-        st.info("ℹ️ **Le montant dépasse 2 milliards FCFA.** Veuillez saisir la Prime Nette et les Accessoires fournis par la Direction Technique. Les taxes et la prime TTC seront calculés automatiquement.")
-    elif raison_manuel == "validation_dt":
-        st.info("ℹ️ **Tarification manuelle de la Direction Technique.** Veuillez saisir la Prime Nette et les Accessoires fournis. Les taxes et la prime TTC seront calculés automatiquement.")
-    elif raison_manuel == "volontaire":
-        st.info("ℹ️ **Tarification manuelle (hors barème).** Veuillez saisir la Prime Nette et les Accessoires. Les taxes et la prime TTC seront calculés automatiquement.")
-    
-    col_m1, col_m2 = st.columns(2)
-    prime_nette_manuelle = col_m1.number_input("Prime Nette (FCFA)", min_value=0, value=0, step=10_000, format="%d", key="prime_nette_man")
-    accessoires_manuels = col_m2.number_input("Accessoires (FCFA)", min_value=0, value=0, step=1_000, format="%d", key="accessoires_man")
-    
-    st.markdown('<div class="divider"></div>', unsafe_allow_html=True)
+    st.markdown('<div class="section-subtitle">Saisie manuelle des primes</div>', unsafe_allow_html=True)
+    col1, col2 = st.columns(2)
+    with col1:
+        prime_nette_manuelle = st.number_input(
+            "Prime nette (FCFA)",
+            min_value=0.0,
+            value=0.0,
+            step=10000.0
+        )
+    with col2:
+        accessoires_manuels = st.number_input(
+            "Accessoires (FCFA)",
+            min_value=0.0,
+            value=0.0,
+            step=1000.0
+        )
+else:
+    raison_manuel = None
+    prime_nette_manuelle = 0
+    accessoires_manuels = 0
 
-# ---------------------------------------------------------
-# 8. Bouton de calcul
-# ---------------------------------------------------------
-# Désactiver le bouton si: (1) il y a des alertes ET (2) on n'est pas en mode manuel
-desactiver_calcul = (len(alerts) > 0) and not mode_manuel
-calcule = st.button("Calculer la prime", type="primary", use_container_width=True, disabled=desactiver_calcul)
+# Le bouton est toujours activé
+calcule = st.button("Calculer la prime", type="primary", use_container_width=True)
 
-# ---------------------------------------------------------
-# 9. Calculs & Affichage des résultats
-# ---------------------------------------------------------
+# Section 9 : Calculs et résultats
 if calcule:
+    # Fonction de formatage pour l'affichage Streamlit (avec espace comme séparateur)
+    def format_st(amount):
+        return f"{amount:,.0f}".replace(",", " ")
+
     if mode_manuel:
-        # MODE MANUEL : Utiliser les valeurs saisies
+        # MODE MANUEL
         prime_nette = prime_nette_manuelle
         accessoires = accessoires_manuels
         taxes = calc_taxes(prime_nette, accessoires)
         prime_ttc = prime_nette + accessoires + taxes
         
-        # Pas de décomposition détaillée en mode manuel
         taux_net_travaux = 0
         prime_travaux = 0
         prime_maintenance = 0
@@ -782,33 +1495,31 @@ if calcule:
         taux_rc_final = 0
         
     else:
-        # MODE AUTOMATIQUE : Calcul normal
-        # 1. Taux de base travaux (‰)
+        # MODE AUTOMATIQUE
+        # 1. Taux de base
         taux_base = get_taux_base(type_travaux, duree, usage_key, structure)
         
         # 2. Ajustement franchise
         taux_base_franchise = taux_base * FRANCHISE_COEF[franchise_key]
         
-        # 3. Taux net travaux (avec extensions sur taux)
+        # 3. Taux net travaux
         taux_net_travaux = taux_base_franchise
         if ext_deblais:
-            taux_net_travaux += 0.15 # Ajout 0,15‰
+            taux_net_travaux += 0.15
         
-        # 4. Calcul Prime TRAVAUX
+        # 4. Prime TRAVAUX
         prime_travaux = calc_prime(montant, taux_net_travaux)
         
-        # 5. Calcul Prime MAINTENANCE (A05)
+        # 5. Prime MAINTENANCE
         prime_maintenance = 0
         if ext_maintenance:
-            # (MODIFIÉ) Prime = 10% de la prime travaux (calculée sur le taux de base + franchise)
             prime_maintenance_base = calc_prime(montant, taux_base_franchise)
             prime_maintenance = prime_maintenance_base * 0.10
             
-        # 6. Calcul Prime RC (A17)
+        # 6. Prime RC
         prime_rc = 0
         taux_rc_final = 0
         if ext_rc:
-            # Taux RC calculé sur Taux Net Travaux (incluant déblais)
             taux_rc_final = calc_taux_rc(
                 type_travaux, 
                 taux_net_travaux, 
@@ -818,95 +1529,118 @@ if calcule:
             )
             prime_rc = calc_prime(montant, taux_rc_final)
             
-        # 7. Calcul Prime DOMMAGES AUX EXISTANTS (A20)
+        # 7. Prime EXISTANTS
         prime_existants = 0
         if ext_existants:
-            # Plafond de garantie = 20% du montant travaux
             valeur_existants = 0.2 * montant
-            # Taux = 50% du Taux Net Travaux (Taux base + extensions hors GEMP)
             taux_existants = taux_net_travaux * 0.5
             prime_existants = calc_prime(valeur_existants, taux_existants)
 
-        # 8. Primes totales (incluant équipements si applicable)
-        prime_nette = prime_travaux + prime_maintenance + prime_rc + prime_existants + prime_totale_equipements
+        # 8. Totaux + Primes extensions DT
+        prime_extensions_dt = prime_maint_etendue + prime_maint_const + prime_materiel + prime_baraquement + prime_gemp
+        prime_nette = prime_travaux + prime_maintenance + prime_rc + prime_existants + prime_totale_equipements + prime_extensions_dt
         accessoires = calc_accessoires(prime_nette)
         taxes = calc_taxes(prime_nette, accessoires)
         prime_ttc = prime_nette + accessoires + taxes
 
-    # ---------------------------------------------------------
     # Affichage des résultats
-    # ---------------------------------------------------------
     st.markdown('<div class="section-title">Résultats de la cotation</div>', unsafe_allow_html=True)
     
     if mode_manuel:
-        # Affichage simplifié pour le mode manuel avec message contextualisé
         if raison_manuel == "montant_eleve":
             st.info("ℹ️ **Tarification manuelle** (montant > 2 milliards FCFA)")
         elif raison_manuel == "validation_dt":
-            st.info("ℹ️ **Tarification manuelle** (validation Direction Technique)")
+            st.info("ℹ️ **Tarification manuelle** (extensions nécessitant validation Direction Technique)")
         elif raison_manuel == "volontaire":
             st.info("ℹ️ **Tarification manuelle** (hors barème - choix volontaire)")
     else:
-        # Tableau de décomposition (mode automatique uniquement)
+        # Tableau de décomposition
         st.markdown("**Décomposition de la prime**")
         
-        # Création d'un tableau simple
         decomposition_data = []
         
-        # Prime Travaux
         decomposition_data.append({
-            "Garantie": "Prime Travaux",
-            "Montant (FCFA)": f"{prime_travaux:,.0f}",
+            "Garantie": "Prime Dommages à l'ouvrage (Travaux)",
+            "Montant (FCFA)": format_st(prime_travaux),
             "Taux (‰)": f"{taux_net_travaux:.3f}"
         })
         
-        # Prime Maintenance (si applicable)
         if ext_maintenance:
             decomposition_data.append({
                 "Garantie": "Prime Maintenance Visite (A05)",
-                "Montant (FCFA)": f"{prime_maintenance:,.0f}",
+                "Montant (FCFA)": format_st(prime_maintenance),
                 "Taux (‰)": "-"
             })
         
-        # Prime RC (si applicable)
         if ext_rc:
             decomposition_data.append({
                 "Garantie": "Prime Responsabilité Civile (A17)",
-                "Montant (FCFA)": f"{prime_rc:,.0f}",
+                "Montant (FCFA)": format_st(prime_rc),
                 "Taux (‰)": f"{taux_rc_final:.3f}"
             })
         
-        # Prime Existants (si applicable)
         if ext_existants:
             decomposition_data.append({
                 "Garantie": "Prime Dommages aux Existants (A20)",
-                "Montant (FCFA)": f"{prime_existants:,.0f}",
+                "Montant (FCFA)": format_st(prime_existants),
                 "Taux (‰)": f"{taux_net_travaux * 0.5:.3f}"
             })
         
-        # Prime Équipements (si applicable)
         if prime_totale_equipements > 0:
             decomposition_data.append({
                 "Garantie": f"Prime Équipements et Installations (A21/A22) - {len(st.session_state.equipements)} équipement(s)",
-                "Montant (FCFA)": f"{prime_totale_equipements:,.0f}",
+                "Montant (FCFA)": format_st(prime_totale_equipements),
                 "Taux (‰)": "-"
             })
         
-        # Affichage du tableau
-        import pandas as pd
+        # Extensions DT
+        if ext_maint_etendue and prime_maint_etendue > 0:
+            decomposition_data.append({
+                "Garantie": "Prime Maintenance étendue (A06)",
+                "Montant (FCFA)": format_st(prime_maint_etendue),
+                "Taux (‰)": "-"
+            })
+        
+        if ext_maint_const and prime_maint_const > 0:
+            decomposition_data.append({
+                "Garantie": "Prime Maintenance constructeur (A07)",
+                "Montant (FCFA)": format_st(prime_maint_const),
+                "Taux (‰)": "-"
+            })
+        
+        if ext_materiel and prime_materiel > 0:
+            decomposition_data.append({
+                "Garantie": "Prime Matériel et installations (A21)",
+                "Montant (FCFA)": format_st(prime_materiel),
+                "Taux (‰)": "-"
+            })
+        
+        if ext_baraquement and prime_baraquement > 0:
+            decomposition_data.append({
+                "Garantie": "Prime Baraquements provisoires (A22)",
+                "Montant (FCFA)": format_st(prime_baraquement),
+                "Taux (‰)": "-"
+            })
+        
+        if ext_gemp and prime_gemp > 0:
+            decomposition_data.append({
+                "Garantie": "Prime Garantie Environnement (FANAF01)",
+                "Montant (FCFA)": format_st(prime_gemp),
+                "Taux (‰)": "-"
+            })
+        
         df_decomposition = pd.DataFrame(decomposition_data)
         st.dataframe(df_decomposition, use_container_width=True, hide_index=True)
     
     # Total
     st.markdown("**Total**")
     col1, col2, col3, col4 = st.columns(4)
-    col1.metric("Prime Nette", f"{prime_nette:,.0f} FCFA")
-    col2.metric("Accessoires", f"{accessoires:,.0f} FCFA")
-    col3.metric("Taxes (14.5%)", f"{taxes:,.0f} FCFA")
-    col4.metric("**PRIME TTC**", f"**{prime_ttc:,.0f} FCFA**")
+    col1.metric("Prime Nette", f"{format_st(prime_nette)} FCFA")
+    col2.metric("Accessoires", f"{format_st(accessoires)} FCFA")
+    col3.metric("Taxes (14.5%)", f"{format_st(taxes)} FCFA")
+    col4.metric("**PRIME TTC**", f"**{format_st(prime_ttc)} FCFA**")
 
-
-    # NOUVEAU: Affichage des clauses
+    # Clauses
     st.markdown('<div class="divider"></div>', unsafe_allow_html=True)
     st.markdown('<div class="section-title">Clauses à insérer au contrat</div>', unsafe_allow_html=True)
     
@@ -916,19 +1650,121 @@ if calcule:
         
     st.markdown("<h6>Clauses relatives aux extensions souscrites</h6>", unsafe_allow_html=True)
     clauses_ext_actives = []
-    if ext_maintenance: clauses_ext_actives.append(CLAUSES["extensions"]["A05"])
-    if ext_rc: clauses_ext_actives.append(CLAUSES["extensions"]["A17"]) # A17 est la RC
-    if ext_rc_croisee: clauses_ext_actives.append("A17 (RC Croisée)") # Précision
-    if ext_existants: clauses_ext_actives.append(CLAUSES["extensions"]["A20"])
-    # Celles soumises à DT
-    if ext_maint_etendue: clauses_ext_actives.append(CLAUSES["extensions"]["A06"])
-    if ext_maint_const: clauses_ext_actives.append(CLAUSES["extensions"]["A07"])
-    if ext_materiel: clauses_ext_actives.append(CLAUSES["extensions"]["A21"])
-    if ext_baraquement: clauses_ext_actives.append(CLAUSES["extensions"]["A22"])
-    if ext_gemp: clauses_ext_actives.append(CLAUSES["extensions"]["FANAF01"])
+    if ext_maintenance: 
+        clauses_ext_actives.append(CLAUSES["extensions"]["A05"])
+    if ext_rc: 
+        clauses_ext_actives.append(CLAUSES["extensions"]["A17"])
+    if ext_rc_croisee: 
+        clauses_ext_actives.append("A17 (RC Croisée)")
+    if ext_existants: 
+        clauses_ext_actives.append(CLAUSES["extensions"]["A20"])
+    if ext_maint_etendue: 
+        clauses_ext_actives.append(CLAUSES["extensions"]["A06"])
+    if ext_maint_const: 
+        clauses_ext_actives.append(CLAUSES["extensions"]["A07"])
+    if ext_materiel: 
+        clauses_ext_actives.append(CLAUSES["extensions"]["A21"])
+    if ext_baraquement: 
+        clauses_ext_actives.append(CLAUSES["extensions"]["A22"])
+    if ext_gemp: 
+        clauses_ext_actives.append(CLAUSES["extensions"]["FANAF01"])
     
     if clauses_ext_actives:
         for clause in clauses_ext_actives:
             st.write(f"- {clause}")
     else:
         st.info("Aucune extension (A05, A06, A07, A17, A20, A21, A22, FANAF01) n'a été sélectionnée.")
+    
+    # Bouton de téléchargement PDF
+    st.markdown('<div class="divider"></div>', unsafe_allow_html=True)
+    st.markdown('<div class="section-title">Télécharger la cotation</div>', unsafe_allow_html=True)
+    
+    # Préparer les données pour le PDF
+    pdf_data = {
+        'souscripteur': souscripteur,
+        'proposant': proposant,
+        'intermediaire': intermediaire,
+        'entreprise_principale': entreprise_principale,
+        'maitre_ouvrage': maitre_ouvrage,
+        'maitrise_oeuvre': maitrise_oeuvre,
+        'bureau_controle': bureau_controle,
+        'labo_geotechnique': labo_geotechnique,
+        'autres_intervenants': autres_intervenants,
+        'nature_travaux': nature_travaux,
+        'situation_geo': situation_geo,
+        'debut_travaux': debut_travaux.strftime('%d/%m/%Y'),
+        'fin_travaux': fin_travaux.strftime('%d/%m/%Y'),
+        'duree': duree,
+        'duree_texte': f"{duree} mois",
+        'duree_maintenance': "12 mois" if maintenance_incluse else "N/A",
+        'maintenance_incluse': maintenance_incluse,
+        'periode_maintenance': periode_maintenance if maintenance_incluse else "N/A",
+        'essai_inclus': essai_inclus,
+        'periode_essai': periode_essai if essai_inclus else "N/A",
+        'montant': montant,
+        'montant_f': f"{montant:,.0f}",
+        'date_cotation': datetime.date.today().strftime('%d.%m.%Y'),
+        'date_demande': datetime.date.today().strftime('%d/%m/%Y'),
+        'prime_nette': prime_nette,
+        'prime_nette_finale': prime_nette,
+        'reduction_commerciale': 0,
+        'accessoires': accessoires,
+        'taxes': taxes,
+        'prime_ttc': prime_ttc,
+        # NOUVEAU: Contenu du champ Exclusions
+        'exclusions_spe': exclusions_spe,
+        # Extensions
+        'ext_honoraires_expert': ext_honoraires_expert,
+        'honoraires_capitaux': honoraires_capitaux if ext_honoraires_expert else "",
+        'honoraires_franchises': honoraires_franchises if ext_honoraires_expert else "",
+        'ext_existants': ext_existants,
+        'existants_capitaux': existants_capitaux if ext_existants else "",
+        'existants_franchises': existants_franchises if ext_existants else "",
+        'ext_erreur_conception': ext_erreur_conception,
+        'erreur_capitaux': erreur_capitaux if ext_erreur_conception else "",
+        'erreur_franchises': erreur_franchises if ext_erreur_conception else "",
+        'ext_heures_suppl': ext_heures_suppl,
+        'heures_capitaux': heures_capitaux if ext_heures_suppl else "",
+        'heures_franchises': heures_franchises if ext_heures_suppl else "",
+        'ext_vol_entrepose': ext_vol_entrepose,
+        'vol_entrepose_capitaux': vol_entrepose_capitaux if ext_vol_entrepose else "",
+        'vol_entrepose_franchises': vol_entrepose_franchises if ext_vol_entrepose else "",
+        'ext_transport_terrestre': ext_transport_terrestre,
+        'transport_terrestre_capitaux': transport_terrestre_capitaux if ext_transport_terrestre else "",
+        'transport_terrestre_franchises': transport_terrestre_franchises if ext_transport_terrestre else "",
+        'ext_transport_aerien': ext_transport_aerien,
+        'transport_aerien_capitaux': transport_aerien_capitaux if ext_transport_aerien else "",
+        'transport_aerien_franchises': transport_aerien_franchises if ext_transport_aerien else "",
+        'ext_conduits_souterrains': ext_conduits_souterrains,
+        'conduits_capitaux': conduits_capitaux if ext_conduits_souterrains else "",
+        'conduits_franchises': conduits_franchises if ext_conduits_souterrains else "",
+        'ext_baraquement': ext_baraquement,
+        'baraquement_capitaux': baraquement_capitaux if ext_baraquement else "",
+        'baraquement_franchises': baraquement_franchises if ext_baraquement else "",
+        'ext_gemp': ext_gemp,
+        'gemp_capitaux': gemp_capitaux if ext_gemp else "",
+        'ext_deblais': ext_deblais,
+        'ext_materiel': ext_materiel,
+        'ext_rc': ext_rc,
+        'rc_capitaux': rc_capitaux_garantis if ext_rc else "",
+        'rc_franchises': rc_franchises if ext_rc else "",
+        'ext_vol_preposes': ext_vol_preposes,
+        'vol_preposes_capitaux': vol_preposes_capitaux if ext_vol_preposes else "",
+        'vol_preposes_franchises': vol_preposes_franchises if ext_vol_preposes else "",
+        'ext_defense_recours': ext_defense_recours,
+        'defense_recours_capitaux': defense_recours_capitaux if ext_defense_recours else "",
+        'defense_recours_franchises': defense_recours_franchises if ext_defense_recours else "",
+    }
+    
+    # Générer le PDF
+    pdf_bytes = generate_pdf(pdf_data)
+    
+    # Bouton de téléchargement
+    st.download_button(
+        label="📥 Télécharger la cotation PDF",
+        data=pdf_bytes,
+        file_name=f"Cotation_TRC_{souscripteur.replace(' ', '_')}_{datetime.date.today().strftime('%Y%m%d')}.pdf",
+        mime="application/pdf",
+        type="primary",
+        use_container_width=True
+    )
