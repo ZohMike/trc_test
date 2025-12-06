@@ -373,6 +373,68 @@ def generate_pdf(data):
         # Se positionner après la ligne
         pdf.set_xy(start_x, start_y + max_height)
     
+    def caracteristique_row(pdf, left_label, left_value, right_label, right_value, font_name):
+        """
+        Crée une ligne de caractéristique avec 2 colonnes (gauche et droite) avec retour à la ligne automatique.
+        Les labels restent en place, seules les valeurs font un retour à la ligne.
+        """
+        start_y = pdf.get_y()
+        
+        # Largeurs des colonnes
+        label_w = 45
+        value_w = 50
+        spacing = 5  # espace entre les 2 colonnes
+        right_label_w = 40
+        
+        # Calculer la hauteur nécessaire pour chaque côté
+        max_height = 6
+        
+        # Calculer hauteur côté gauche
+        if left_label and left_value:
+            left_text = f": {left_value}"
+            lines_left = pdf.multi_cell(value_w, 5, clean_text(left_text), border=0, split_only=True)
+            height_left = len(lines_left) * 5 if lines_left else 5
+            max_height = max(max_height, height_left)
+        
+        # Calculer hauteur côté droit
+        if right_label and right_value:
+            right_text = f": {right_value}"
+            right_value_w = pdf.w - pdf.l_margin - label_w - value_w - spacing - right_label_w - pdf.r_margin
+            lines_right = pdf.multi_cell(right_value_w, 5, clean_text(right_text), border=0, split_only=True)
+            height_right = len(lines_right) * 5 if lines_right else 5
+            max_height = max(max_height, height_right)
+        
+        # Dessiner la colonne gauche
+        if left_label:
+            # Label gauche (en gras, reste en place)
+            pdf.set_xy(pdf.l_margin, start_y)
+            pdf.set_font(font_name, "B", 9)
+            pdf.cell(label_w, 6, clean_text(left_label), 0, 0, 'L')
+            
+            # Valeur gauche (peut faire retour à la ligne)
+            if left_value:
+                pdf.set_font(font_name, "", 9)
+                pdf.set_xy(pdf.l_margin + label_w, start_y)
+                pdf.multi_cell(value_w, 5, clean_text(f": {left_value}"), 0, 'L')
+        
+        # Dessiner la colonne droite
+        if right_label:
+            # Label droit (en gras, reste en place)
+            right_x = pdf.l_margin + label_w + value_w + spacing
+            pdf.set_xy(right_x, start_y)
+            pdf.set_font(font_name, "B", 9)
+            pdf.cell(right_label_w, 6, clean_text(right_label), 0, 0, 'L')
+            
+            # Valeur droite (peut faire retour à la ligne)
+            if right_value:
+                pdf.set_font(font_name, "", 9)
+                pdf.set_xy(right_x + right_label_w, start_y)
+                right_value_w = pdf.w - pdf.l_margin - label_w - value_w - spacing - right_label_w - pdf.r_margin
+                pdf.multi_cell(right_value_w, 5, clean_text(f": {right_value}"), 0, 'L')
+        
+        # Se positionner après la ligne (en utilisant la hauteur max)
+        pdf.set_xy(pdf.l_margin, start_y + max_height)
+    
     # Utiliser DejaVu pour supporter UTF-8
     try:
         pdf.add_font('DejaVu', '', '/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf', uni=True)
@@ -409,13 +471,47 @@ def generate_pdf(data):
     # ============================================================
     
     # Logo et date
-    pdf.set_font(font_name, "B", 12)
-    pdf.cell(100, 10, clean_text("LEADWAY"), 0, 0, 'L')
-    today = datetime.date.today()
-    pdf.cell(0, 10, clean_text(f"Abidjan, le {today.strftime('%d.%m.%Y')}"), 0, 1, 'R')
-    pdf.set_font(font_name, "", 10)
-    pdf.cell(100, 5, clean_text("Assurance"), 0, 1, 'L')
-    pdf.ln(5)
+    logo_path = "leadway logo all formats big-02.png"
+    
+    # Vérifier si le logo existe et l'ajouter
+    import os
+    if os.path.exists(logo_path):
+        # Ajouter le logo tout en haut à gauche
+        try:
+            # Position de départ
+            start_y = pdf.get_y()
+            
+            # Ajouter le logo (largeur 35mm)
+            pdf.image(logo_path, x=pdf.l_margin, y=start_y, w=35)
+            
+            # Positionner la date à droite, alignée avec le haut
+            pdf.set_xy(pdf.w - pdf.r_margin - 70, start_y)
+            pdf.set_font(font_name, "B", 12)
+            today = datetime.date.today()
+            pdf.cell(70, 10, clean_text(f"Abidjan, le {today.strftime('%d.%m.%Y')}"), 0, 1, 'R')
+            
+            # Se positionner bien après le logo (25mm après le début pour laisser de l'espace)
+            pdf.set_y(start_y + 25)
+            pdf.ln(5)
+            
+        except Exception as e:
+            # Si le logo ne peut pas être chargé, afficher le texte par défaut
+            pdf.set_font(font_name, "B", 12)
+            pdf.cell(100, 10, clean_text("LEADWAY"), 0, 0, 'L')
+            today = datetime.date.today()
+            pdf.cell(0, 10, clean_text(f"Abidjan, le {today.strftime('%d.%m.%Y')}"), 0, 1, 'R')
+            pdf.set_font(font_name, "", 10)
+            pdf.cell(100, 5, clean_text("Assurance"), 0, 1, 'L')
+            pdf.ln(5)
+    else:
+        # Si le fichier logo n'existe pas, afficher le texte par défaut
+        pdf.set_font(font_name, "B", 12)
+        pdf.cell(100, 10, clean_text("LEADWAY"), 0, 0, 'L')
+        today = datetime.date.today()
+        pdf.cell(0, 10, clean_text(f"Abidjan, le {today.strftime('%d.%m.%Y')}"), 0, 1, 'R')
+        pdf.set_font(font_name, "", 10)
+        pdf.cell(100, 5, clean_text("Assurance"), 0, 1, 'L')
+        pdf.ln(5)
     
     # BANDEAU JAUNE - TITRE PRINCIPAL
     pdf.set_fill_color(255, 204, 0)
@@ -443,36 +539,20 @@ def generate_pdf(data):
     
     # Informations en tableau 2 colonnes
     caracteristiques_data = [
-        ("Nom ou raison sociale", data.get('souscripteur', ''), 
-         "Duree des travaux", f"{data.get('duree', '')} mois (Date de debut a preciser)"),
-        ("Situation du chantier", data.get('situation_geo', ''), 
-         "Maitre d'ouvrage", data.get('maitre_ouvrage', '')),
-        ("Nature du chantier", data.get('nature_travaux', ''), 
-         "Maitre d'oeuvre", data.get('maitrise_oeuvre', '')),
+        ("Nom ou raison sociale", data.get('souscripteur', '-'), 
+         "Duree des travaux", f"{data.get('duree', '-')} mois (Date de debut a preciser)"),
+        ("Situation du chantier", data.get('situation_geo', '-'), 
+         "Maitre d'ouvrage", data.get('maitre_ouvrage', '-')),
+        ("Nature du chantier", data.get('nature_travaux', '-'), 
+         "Maitre d'oeuvre", data.get('maitrise_oeuvre', '-')),
         ("", "", 
-         "Controle Technique", data.get('bureau_controle', 'A nous communiquer')),
+         "Controle Technique", data.get('bureau_controle', '-')),
         ("Montant des travaux", f"{format_amount_fr(data.get('montant', 0))} F CFA", 
-         "Duree de Maintenance", f"{data.get('duree_maintenance', '12')} mois"),
+         "Duree de Maintenance", f"{data.get('duree_maintenance', '-')} mois"),
     ]
     
     for left_label, left_value, right_label, right_value in caracteristiques_data:
-        # Colonne gauche
-        if left_label:
-            pdf.set_font(font_name, "B", 9)
-            pdf.cell(45, 6, clean_text(left_label), 0, 0, 'L')
-            pdf.set_font(font_name, "", 9)
-            pdf.cell(50, 6, clean_text(f": {left_value}"), 0, 0, 'L')
-        else:
-            pdf.cell(95, 6, "", 0, 0, 'L')
-        
-        # Colonne droite
-        if right_label:
-            pdf.set_font(font_name, "B", 9)
-            pdf.cell(40, 6, clean_text(right_label), 0, 0, 'L')
-            pdf.set_font(font_name, "", 9)
-            pdf.cell(0, 6, clean_text(f": {right_value}"), 0, 1, 'L')
-        else:
-            pdf.ln()
+        caracteristique_row(pdf, left_label, left_value, right_label, right_value, font_name)
     
     pdf.ln(5)
     
@@ -600,8 +680,8 @@ def generate_pdf(data):
     
     # Honoraires d'expert
     honoraires_statut = "Garanti" if data.get('ext_honoraires_expert') else "Exclu"
-    honoraires_cap = data.get('honoraires_capitaux', '') if data.get('ext_honoraires_expert') else ''
-    honoraires_fran = data.get('honoraires_franchises', '') if data.get('ext_honoraires_expert') else ''
+    honoraires_cap = data.get('honoraires_capitaux', '-') if data.get('ext_honoraires_expert') else '-'
+    honoraires_fran = data.get('honoraires_franchises', '-') if data.get('ext_honoraires_expert') else '-'
     table_row_multicell(pdf, 
                        [col1_w, col2_w, col3_w, col4_w],
                        [clean_text("Honoraires d'expert"), 
@@ -613,8 +693,8 @@ def generate_pdf(data):
     
     # Dommages aux biens et existants
     existants_statut = "Garanti" if data.get('ext_existants') else "Exclu"
-    existants_cap = data.get('existants_capitaux', '') if data.get('ext_existants') else ''
-    existants_fran = data.get('existants_franchises', '') if data.get('ext_existants') else ''
+    existants_cap = data.get('existants_capitaux', '-')
+    existants_fran = data.get('existants_franchises', '-')
     table_row_multicell(pdf, 
                        [col1_w, col2_w, col3_w, col4_w],
                        [clean_text("Dommages aux biens et existants"), 
@@ -626,8 +706,8 @@ def generate_pdf(data):
     
     # Erreur de conception
     erreur_statut = "Garanti" if data.get('ext_erreur_conception') else "Exclu"
-    erreur_cap = data.get('erreur_capitaux', '') if data.get('ext_erreur_conception') else ''
-    erreur_fran = data.get('erreur_franchises', '') if data.get('ext_erreur_conception') else ''
+    erreur_cap = data.get('erreur_capitaux', '-')
+    erreur_fran = data.get('erreur_franchises', '-')
     table_row_multicell(pdf, 
                        [col1_w, col2_w, col3_w, col4_w],
                        [clean_text("Erreur de conception (Y compris parties viciees)"), 
@@ -639,8 +719,8 @@ def generate_pdf(data):
     
     # Engins de chantier
     engins_statut = "Garanti" if (data.get('ext_materiel') or data.get('ext_baraquement')) else "Exclu"
-    engins_cap = data.get('materiel_capitaux', '') if data.get('ext_materiel') else ''
-    engins_fran = data.get('materiel_franchises', '') if data.get('ext_materiel') else ''
+    engins_cap = data.get('materiel_capitaux', '-') if data.get('ext_materiel') else '-'
+    engins_fran = data.get('materiel_franchises', '-') if data.get('ext_materiel') else '-'
     table_row_multicell(pdf, 
                        [col1_w, col2_w, col3_w, col4_w],
                        [clean_text("Engins de chantier"), 
@@ -652,8 +732,8 @@ def generate_pdf(data):
     
     # Heures supplémentaires
     heures_statut = "Garanti" if data.get('ext_heures_suppl') else "Exclu"
-    heures_cap = data.get('heures_capitaux', '') if data.get('ext_heures_suppl') else ''
-    heures_fran = data.get('heures_franchises', '') if data.get('ext_heures_suppl') else ''
+    heures_cap = data.get('heures_capitaux', '-') if data.get('ext_heures_suppl') else '-'
+    heures_fran = data.get('heures_franchises', '-') if data.get('ext_heures_suppl') else '-'
     table_row_multicell(pdf, 
                        [col1_w, col2_w, col3_w, col4_w],
                        [clean_text("Heures supplementaires, Travail de nuit, Transport a grande vitesse"), 
@@ -665,8 +745,8 @@ def generate_pdf(data):
     
     # Vol des biens entreposés
     vol_statut = "Garanti" if data.get('ext_vol_entrepose') else "Exclu"
-    vol_cap = data.get('vol_entrepose_capitaux', '') if data.get('ext_vol_entrepose') else ''
-    vol_fran = data.get('vol_entrepose_franchises', '') if data.get('ext_vol_entrepose') else ''
+    vol_cap = data.get('vol_entrepose_capitaux', '-') if data.get('ext_vol_entrepose') else '-'
+    vol_fran = data.get('vol_entrepose_franchises', '-') if data.get('ext_vol_entrepose') else '-'
     table_row_multicell(pdf, 
                        [col1_w, col2_w, col3_w, col4_w],
                        [clean_text("Vol des biens entreposes hors chantier"), 
@@ -678,8 +758,8 @@ def generate_pdf(data):
     
     # Transport terrestre
     trans_terr_statut = "Garanti" if data.get('ext_transport_terrestre') else "Exclu"
-    trans_terr_cap = data.get('transport_terrestre_capitaux', '') if data.get('ext_transport_terrestre') else ''
-    trans_terr_fran = data.get('transport_terrestre_franchises', '') if data.get('ext_transport_terrestre') else ''
+    trans_terr_cap = data.get('transport_terrestre_capitaux', '-') if data.get('ext_transport_terrestre') else '-'
+    trans_terr_fran = data.get('transport_terrestre_franchises', '-') if data.get('ext_transport_terrestre') else '-'
     table_row_multicell(pdf, 
                        [col1_w, col2_w, col3_w, col4_w],
                        [clean_text("Transport terrestre"), 
@@ -691,8 +771,8 @@ def generate_pdf(data):
     
     # Transport aérien
     trans_aer_statut = "Garanti" if data.get('ext_transport_aerien') else "Exclu"
-    trans_aer_cap = data.get('transport_aerien_capitaux', '') if data.get('ext_transport_aerien') else ''
-    trans_aer_fran = data.get('transport_aerien_franchises', '') if data.get('ext_transport_aerien') else ''
+    trans_aer_cap = data.get('transport_aerien_capitaux', '-') if data.get('ext_transport_aerien') else '-'
+    trans_aer_fran = data.get('transport_aerien_franchises', '-') if data.get('ext_transport_aerien') else '-'
     table_row_multicell(pdf, 
                        [col1_w, col2_w, col3_w, col4_w],
                        [clean_text("Transport aerien"), 
@@ -704,8 +784,8 @@ def generate_pdf(data):
     
     # Baraquement
     baraq_statut = "Garanti" if data.get('ext_baraquement') else "Exclu"
-    baraq_cap = data.get('baraquement_capitaux', '') if data.get('ext_baraquement') else ''
-    baraq_fran = data.get('baraquement_franchises', '') if data.get('ext_baraquement') else ''
+    baraq_cap = data.get('baraquement_capitaux', '-') if data.get('ext_baraquement') else '-'
+    baraq_fran = data.get('baraquement_franchises', '-') if data.get('ext_baraquement') else '-'
     table_row_multicell(pdf, 
                        [col1_w, col2_w, col3_w, col4_w],
                        [clean_text("Baraquement, entrepot, bureaux provisoires"), 
@@ -717,8 +797,8 @@ def generate_pdf(data):
     
     # Conduits et Souterrains
     conduits_statut = "Garanti" if data.get('ext_conduits_souterrains') else "Exclu"
-    conduits_cap = data.get('conduits_capitaux', '') if data.get('ext_conduits_souterrains') else ''
-    conduits_fran = data.get('conduits_franchises', '') if data.get('ext_conduits_souterrains') else ''
+    conduits_cap = data.get('conduits_capitaux', '-') if data.get('ext_conduits_souterrains') else '-'
+    conduits_fran = data.get('conduits_franchises', '-') if data.get('ext_conduits_souterrains') else '-'
     table_row_multicell(pdf, 
                        [col1_w, col2_w, col3_w, col4_w],
                        [clean_text("Conduits et Souterrains"), 
@@ -730,8 +810,8 @@ def generate_pdf(data):
     
     # Tempête, GEMP
     gemp_statut = "Garanti" if data.get('ext_gemp') else "Exclu"
-    gemp_cap = data.get('gemp_capitaux', '') if data.get('ext_gemp') else ''
-    gemp_fran = "10% mini 15 000 000" if data.get('ext_gemp') else ''
+    gemp_cap = data.get('gemp_capitaux', '-') if data.get('ext_gemp') else '-'
+    gemp_fran = "10% mini 15 000 000" if data.get('ext_gemp') else '-'
     table_row_multicell(pdf, 
                        [col1_w, col2_w, col3_w, col4_w],
                        [clean_text("Tempete, Ouragan, Cyclone, GEMP inondation"), 
@@ -747,23 +827,23 @@ def generate_pdf(data):
                        [col1_w, col2_w, col3_w, col4_w],
                        [clean_text("Frais de deblai et demolition"), 
                         clean_text(deblai_statut), 
-                        clean_text("5% de l'indemnite" if data.get('ext_deblais') else ''), 
-                        clean_text("Neant" if data.get('ext_deblais') else '')],
+                        clean_text("5% de l'indemnite" if data.get('ext_deblais') else '-'), 
+                        clean_text("Neant" if data.get('ext_deblais') else '-')],
                        height=5,
                        align=['L', 'C', 'R', 'C'])
     
     # II- RC + RC CROISEE
     pdf.set_fill_color(200, 200, 200)
     pdf.set_font(font_name, "B", 9)
-    rc_title = "RC + RC CROISEE"
+    rc_title = "II-        RC + RC CROISEE"
     pdf.cell(col1_w + col2_w + col3_w + col4_w, 6, clean_text(rc_title), 1, 1, 'L', fill=True)
     
     pdf.set_font(font_name, "", 7)
     
     # Statut RC
     rc_statut = "Garanti" if data.get('ext_rc') else "Exclu"
-    rc_cap = data.get('rc_capitaux', '') if data.get('ext_rc') else ''
-    rc_fran = data.get('rc_franchises', '') if data.get('ext_rc') else ''
+    rc_cap = data.get('rc_capitaux', '-') if data.get('ext_rc') else '-'
+    rc_fran = data.get('rc_franchises', '-') if data.get('ext_rc') else '-'
     
     # Ligne 2: Tous Dommages confondus dont
     table_row_multicell(pdf, 
@@ -777,33 +857,35 @@ def generate_pdf(data):
                        [col1_w, col2_w, col3_w, col4_w],
                        [clean_text("- Dommages materiels et immateriels consecutifs avec un capital epuisable pour la duree des travaux"),
                         clean_text("Garanti" if data.get('ext_rc') else "Exclu"),
-                        clean_text("500 000 000" if data.get('ext_rc') else ''),
-                        ""],
+                        clean_text("500 000 000" if data.get('ext_rc') else '-'),
+                        clean_text(rc_fran)],
                        height=5,
                        align=['L', 'C', 'R', 'C'])
     
     # Ligne 4: Vol par préposés au préjudice des tiers
     vol_prep_statut = "Garanti" if data.get('ext_vol_preposes') else "Exclu"
-    vol_prep_cap = data.get('vol_preposes_capitaux', '') if data.get('ext_vol_preposes') else ''
-    vol_prep_fran = data.get('vol_preposes_franchises', '') if data.get('ext_vol_preposes') else ''
+    vol_prep_cap = data.get('vol_preposes_capitaux', '-') if data.get('ext_vol_preposes') else '-'
+    vol_prep_fran = data.get('vol_preposes_franchises', '-') if data.get('ext_vol_preposes') else '-'
     
     vol_cap_text = ""
     if data.get('ext_vol_preposes'):
         vol_cap_text = clean_text("10% des dommages materiels dans la limite de 50 000 000")
+    else:
+        vol_cap_text = "-"
     
     table_row_multicell(pdf, 
                        [col1_w, col2_w, col3_w, col4_w],
                        [clean_text("- Vol par preposes au prejudice des tiers"),
                         clean_text(vol_prep_statut),
                         vol_cap_text,
-                        ""],
+                        clean_text(vol_prep_fran)],
                        height=5,
                        align=['L', 'C', 'C', 'C'])
     
     # Ligne 5: Défense et Recours
     defense_statut = "Garanti" if data.get('ext_defense_recours') else "Exclu"
-    defense_cap = data.get('defense_recours_capitaux', '') if data.get('ext_defense_recours') else ''
-    defense_fran = data.get('defense_recours_franchises', '') if data.get('ext_defense_recours') else ''
+    defense_cap = data.get('defense_recours_capitaux', '-') if data.get('ext_defense_recours') else '-'
+    defense_fran = data.get('defense_recours_franchises', '-') if data.get('ext_defense_recours') else '-'
     
     table_row_multicell(pdf, 
                        [col1_w, col2_w, col3_w, col4_w],
@@ -913,11 +995,9 @@ def generate_pdf(data):
     
     pdf.ln(10)
     
-    # Signature
-    pdf.set_font(font_name, "", 10)
-    pdf.cell(0, 6, "", 0, 1, 'R')
+    # Signature simple
     pdf.set_font(font_name, "B", 10)
-    pdf.cell(0, 6, clean_text("LEADWAY Assurance"), 0, 1, 'R')
+    pdf.cell(0, 6, clean_text("Leadway Assurance"), 0, 1, 'R')
     
     # Obtenir la sortie PDF comme bytes
     output = pdf.output()
@@ -1693,28 +1773,35 @@ if calcule:
     st.markdown('<div class="divider"></div>', unsafe_allow_html=True)
     st.markdown('<div class="section-title">Télécharger la cotation</div>', unsafe_allow_html=True)
     
+    # Fonction helper pour remplacer les valeurs vides par "-"
+    def default_dash(value):
+        """Retourne '-' si la valeur est vide, sinon retourne la valeur"""
+        if value is None or value == "" or (isinstance(value, str) and value.strip() == ""):
+            return "-"
+        return value
+    
     # Préparer les données pour le PDF
     pdf_data = {
-        'souscripteur': souscripteur,
-        'proposant': proposant,
-        'intermediaire': intermediaire,
-        'entreprise_principale': entreprise_principale,
-        'maitre_ouvrage': maitre_ouvrage,
-        'maitrise_oeuvre': maitrise_oeuvre,
-        'bureau_controle': bureau_controle,
-        'labo_geotechnique': labo_geotechnique,
-        'autres_intervenants': autres_intervenants,
-        'nature_travaux': nature_travaux,
-        'situation_geo': situation_geo,
+        'souscripteur': default_dash(souscripteur),
+        'proposant': default_dash(proposant),
+        'intermediaire': default_dash(intermediaire),
+        'entreprise_principale': default_dash(entreprise_principale),
+        'maitre_ouvrage': default_dash(maitre_ouvrage),
+        'maitrise_oeuvre': default_dash(maitrise_oeuvre),
+        'bureau_controle': default_dash(bureau_controle),
+        'labo_geotechnique': default_dash(labo_geotechnique),
+        'autres_intervenants': default_dash(autres_intervenants),
+        'nature_travaux': default_dash(nature_travaux),
+        'situation_geo': default_dash(situation_geo),
         'debut_travaux': debut_travaux.strftime('%d/%m/%Y'),
         'fin_travaux': fin_travaux.strftime('%d/%m/%Y'),
         'duree': duree,
         'duree_texte': f"{duree} mois",
-        'duree_maintenance': "12 mois" if maintenance_incluse else "N/A",
+        'duree_maintenance': "12 mois" if maintenance_incluse else "-",
         'maintenance_incluse': maintenance_incluse,
-        'periode_maintenance': periode_maintenance if maintenance_incluse else "N/A",
+        'periode_maintenance': periode_maintenance if maintenance_incluse else "-",
         'essai_inclus': essai_inclus,
-        'periode_essai': periode_essai if essai_inclus else "N/A",
+        'periode_essai': periode_essai if essai_inclus else "-",
         'montant': montant,
         'montant_f': f"{montant:,.0f}",
         'date_cotation': datetime.date.today().strftime('%d.%m.%Y'),
@@ -1729,45 +1816,45 @@ if calcule:
         'exclusions_spe': exclusions_spe,
         # Extensions
         'ext_honoraires_expert': ext_honoraires_expert,
-        'honoraires_capitaux': honoraires_capitaux if ext_honoraires_expert else "",
-        'honoraires_franchises': honoraires_franchises if ext_honoraires_expert else "",
+        'honoraires_capitaux': default_dash(honoraires_capitaux) if ext_honoraires_expert else "-",
+        'honoraires_franchises': default_dash(honoraires_franchises) if ext_honoraires_expert else "-",
         'ext_existants': ext_existants,
-        'existants_capitaux': existants_capitaux if ext_existants else "",
-        'existants_franchises': existants_franchises if ext_existants else "",
+        'existants_capitaux': default_dash(existants_capitaux) if ext_existants else "-",
+        'existants_franchises': default_dash(existants_franchises) if ext_existants else "-",
         'ext_erreur_conception': ext_erreur_conception,
-        'erreur_capitaux': erreur_capitaux if ext_erreur_conception else "",
-        'erreur_franchises': erreur_franchises if ext_erreur_conception else "",
+        'erreur_capitaux': default_dash(erreur_capitaux) if ext_erreur_conception else "-",
+        'erreur_franchises': default_dash(erreur_franchises) if ext_erreur_conception else "-",
         'ext_heures_suppl': ext_heures_suppl,
-        'heures_capitaux': heures_capitaux if ext_heures_suppl else "",
-        'heures_franchises': heures_franchises if ext_heures_suppl else "",
+        'heures_capitaux': default_dash(heures_capitaux) if ext_heures_suppl else "-",
+        'heures_franchises': default_dash(heures_franchises) if ext_heures_suppl else "-",
         'ext_vol_entrepose': ext_vol_entrepose,
-        'vol_entrepose_capitaux': vol_entrepose_capitaux if ext_vol_entrepose else "",
-        'vol_entrepose_franchises': vol_entrepose_franchises if ext_vol_entrepose else "",
+        'vol_entrepose_capitaux': default_dash(vol_entrepose_capitaux) if ext_vol_entrepose else "-",
+        'vol_entrepose_franchises': default_dash(vol_entrepose_franchises) if ext_vol_entrepose else "-",
         'ext_transport_terrestre': ext_transport_terrestre,
-        'transport_terrestre_capitaux': transport_terrestre_capitaux if ext_transport_terrestre else "",
-        'transport_terrestre_franchises': transport_terrestre_franchises if ext_transport_terrestre else "",
+        'transport_terrestre_capitaux': default_dash(transport_terrestre_capitaux) if ext_transport_terrestre else "-",
+        'transport_terrestre_franchises': default_dash(transport_terrestre_franchises) if ext_transport_terrestre else "-",
         'ext_transport_aerien': ext_transport_aerien,
-        'transport_aerien_capitaux': transport_aerien_capitaux if ext_transport_aerien else "",
-        'transport_aerien_franchises': transport_aerien_franchises if ext_transport_aerien else "",
+        'transport_aerien_capitaux': default_dash(transport_aerien_capitaux) if ext_transport_aerien else "-",
+        'transport_aerien_franchises': default_dash(transport_aerien_franchises) if ext_transport_aerien else "-",
         'ext_conduits_souterrains': ext_conduits_souterrains,
-        'conduits_capitaux': conduits_capitaux if ext_conduits_souterrains else "",
-        'conduits_franchises': conduits_franchises if ext_conduits_souterrains else "",
+        'conduits_capitaux': default_dash(conduits_capitaux) if ext_conduits_souterrains else "-",
+        'conduits_franchises': default_dash(conduits_franchises) if ext_conduits_souterrains else "-",
         'ext_baraquement': ext_baraquement,
-        'baraquement_capitaux': baraquement_capitaux if ext_baraquement else "",
-        'baraquement_franchises': baraquement_franchises if ext_baraquement else "",
+        'baraquement_capitaux': default_dash(baraquement_capitaux) if ext_baraquement else "-",
+        'baraquement_franchises': default_dash(baraquement_franchises) if ext_baraquement else "-",
         'ext_gemp': ext_gemp,
-        'gemp_capitaux': gemp_capitaux if ext_gemp else "",
+        'gemp_capitaux': default_dash(gemp_capitaux) if ext_gemp else "-",
         'ext_deblais': ext_deblais,
         'ext_materiel': ext_materiel,
         'ext_rc': ext_rc,
-        'rc_capitaux': rc_capitaux_garantis if ext_rc else "",
-        'rc_franchises': rc_franchises if ext_rc else "",
+        'rc_capitaux': default_dash(rc_capitaux_garantis) if ext_rc else "-",
+        'rc_franchises': default_dash(rc_franchises) if ext_rc else "-",
         'ext_vol_preposes': ext_vol_preposes,
-        'vol_preposes_capitaux': vol_preposes_capitaux if ext_vol_preposes else "",
-        'vol_preposes_franchises': vol_preposes_franchises if ext_vol_preposes else "",
+        'vol_preposes_capitaux': default_dash(vol_preposes_capitaux) if ext_vol_preposes else "-",
+        'vol_preposes_franchises': default_dash(vol_preposes_franchises) if ext_vol_preposes else "-",
         'ext_defense_recours': ext_defense_recours,
-        'defense_recours_capitaux': defense_recours_capitaux if ext_defense_recours else "",
-        'defense_recours_franchises': defense_recours_franchises if ext_defense_recours else "",
+        'defense_recours_capitaux': default_dash(defense_recours_capitaux) if ext_defense_recours else "-",
+        'defense_recours_franchises': default_dash(defense_recours_franchises) if ext_defense_recours else "-",
     }
     
     # Générer le PDF
